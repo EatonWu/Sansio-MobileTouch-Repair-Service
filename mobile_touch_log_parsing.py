@@ -27,6 +27,7 @@ class TriggerString(enum.Enum):
     # this usually points a missing device info or a corrupt object store
     FAILED_GET_DEVICE_INFO = "storeAction() fail: LoadByKey:getDeviceInfo"
 
+    # The ones below require a hard reset, which is fine since the chart/app data is likely lost anyway
     # response should be to do a hard clear (deletion of appdata)
     # this usually points to database corruption
     CORRUPT_SCHEMA = "init schema: error: Internal error"
@@ -38,6 +39,22 @@ class TriggerString(enum.Enum):
 
     def __init__(self, value):
         self._value_ = value
+        self._callback = None
+
+    @property
+    def callback(self):
+        """Get the callback function for this trigger string."""
+        return self._callback
+
+    @callback.setter
+    def callback(self, func: Callable[['LogEntry'], None]):
+        """
+        Set a callback function to be called when this trigger string is detected.
+
+        Args:
+            func: A function that takes a LogEntry as its argument and returns None.
+        """
+        self._callback = func
 
 class LogLevel(enum.Enum):
     """
@@ -116,7 +133,7 @@ def parse_standard_log() -> List[LogEntry]:
     Example of a standard entry:
     2025-05-26 09:33:40,383 INFO JS API: getNativeVersion returned: 2023.2.208
     Parses the standard log file and extracts relevant information.
-    
+
     Reads log entries from end to beginning, as the most recent entries are at the end.
     Returns a list of LogEntry objects in reverse chronological order (newest first).
     :return: List of LogEntry objects
@@ -172,12 +189,39 @@ def check_last_modified(log_file: Path = standard_log_path):
 def check_trigger_strings(entry: LogEntry):
     """
     Checks a log entry against all defined trigger strings.
+    If a trigger string is found and has a callback registered, the callback is called.
     :param entry: LogEntry to check
+    :return: True if a trigger string was found, False otherwise
     """
     for trigger in TriggerString:
         if trigger.value in entry.message:
-            # TODO: Handle trigger string based on type
             print(f"Detected trigger string {trigger.name}: {entry}")
+            if trigger.callback:
+                trigger.callback(entry)
+            return True
+    return False
+
+
+def register_trigger_callback(trigger: TriggerString, callback: Callable[[LogEntry], None]):
+    """
+    Register a callback function for a specific trigger string.
+
+    Args:
+        trigger: The TriggerString to register the callback for
+        callback: A function that takes a LogEntry as its argument and returns None
+    """
+    trigger.callback = callback
+
+
+def register_trigger_callbacks(callbacks: dict):
+    """
+    Register multiple callback functions for trigger strings.
+
+    Args:
+        callbacks: A dictionary mapping TriggerString to callback functions
+    """
+    for trigger, callback in callbacks.items():
+        register_trigger_callback(trigger, callback)
 
 
 def main_loop():
@@ -217,8 +261,63 @@ def main_loop():
         finally:
             time.sleep(1)
 
+def handle_failed_reference_tables(entry: LogEntry):
+    """
+    Example callback function for FAILED_GET_REFERENCE_TABLES trigger.
+    In a real implementation, this would clear reference tables.
+    """
+    print(f"ACTION: Clearing reference tables due to: {entry.message}")
+
+
+def handle_failed_device_info(entry: LogEntry):
+    """
+    Example callback function for FAILED_GET_DEVICE_INFO trigger.
+    In a real implementation, this would clear device info, cookies, and service worker.
+    """
+    print(f"ACTION: Clearing device info, cookies, and service worker due to: {entry.message}")
+
+
+def handle_corrupt_schema(entry: LogEntry):
+    """
+    Example callback function for CORRUPT_SCHEMA trigger.
+    In a real implementation, this would perform a hard clear (deletion of appdata).
+    """
+    print(f"ACTION: Performing hard clear (deletion of appdata) due to: {entry.message}")
+
+
+def handle_stores_not_set_up(entry: LogEntry):
+    """
+    Example callback function for STORES_NOT_CORRECTLY_SET_UP trigger.
+    In a real implementation, this would perform a hard clear (deletion of appdata).
+    """
+    print(f"ACTION: Performing hard clear (deletion of appdata) due to: {entry.message}")
+
+
+def setup_trigger_callbacks():
+    """
+    Set up callback functions for all trigger strings.
+    """
+    callbacks = {
+        TriggerString.FAILED_GET_REFERENCE_TABLES: handle_failed_reference_tables,
+        TriggerString.FAILED_GET_DEVICE_INFO: handle_failed_device_info,
+        TriggerString.CORRUPT_SCHEMA: handle_corrupt_schema,
+        TriggerString.STORES_NOT_CORRECTLY_SET_UP: handle_stores_not_set_up
+    }
+    register_trigger_callbacks(callbacks)
+
+
 def main():
+    # Set up callback functions for trigger strings
+    setup_trigger_callbacks()
+
+    # Example of registering a single callback
+    # register_trigger_callback(TriggerString.FAILED_GET_REFERENCE_TABLES, handle_failed_reference_tables)
+
+    # Start the main loop
     main_loop()
+
+    # The following code will not be reached during normal operation
+    # because main_loop() runs indefinitely
     check_last_modified()
     entries = parse_standard_log()
 

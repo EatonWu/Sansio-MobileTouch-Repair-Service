@@ -111,9 +111,6 @@ def custom_remove_item(idb: IndexedDB, object_store_name, key):
 def setup_chrome_driver():
     chrome_options = Options()
 
-    # chrome_options.binary_location = "C:\\Users\\Ewu\\Programming\\chrome-win32\\chrome.exe"
-    # service = Service(executable_path='C:\\Users\\Ewu\\Programming\\chromedriver.exe')
-
     # headless
     # chrome_options.add_argument("--headless=new")
     chrome_options.binary_location = ".\\chrome-win32\\chrome.exe"
