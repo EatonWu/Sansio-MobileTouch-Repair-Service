@@ -1,4 +1,4 @@
-# MobileTouch Testing Documentation
+# Testing Documentation
 
 This document provides information about testing MobileTouch error handling using test archives.
 
@@ -36,14 +36,6 @@ The project provides two ways to load and test MobileTouch archives:
 
 These archives contain saved states of the MobileTouch application that can be used for testing and debugging.
 
-### Features
-
-- Automatically extracts test archives to temporary directories
-- Sets up Chrome with the extracted MobileTouch profile
-- Loads the MobileTouch application with the extracted profile
-- Logs browser console output for debugging
-- Cleans up temporary files after testing
-- Pytest integration for better test reporting and management
 
 ### Usage
 

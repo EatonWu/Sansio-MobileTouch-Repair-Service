@@ -4,19 +4,10 @@ import logging
 import os
 import sys
 import time
+import threading
 from pathlib import Path
-from typing import Callable, List
+from typing import Callable, List, Dict, Optional, Union
 
-# Configure logging
-# This logging configuration replaces direct prints to stderr with a more flexible logging system.
-# Benefits:
-# 1. Different log levels (DEBUG, INFO, WARNING, ERROR, CRITICAL) for different types of messages
-# 2. Consistent formatting of log messages
-# 3. Easy redirection of logs to a file instead of stdout/stderr
-# 4. Control over log verbosity through the level setting
-#
-# To log to a file instead of stdout, uncomment the FileHandler line below.
-# To change the log level, modify the level parameter (e.g., logging.DEBUG for more verbose logging).
 logging.basicConfig(
     level=logging.DEBUG,  # Set to logging.DEBUG for more verbose output
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -32,6 +23,7 @@ logger = logging.getLogger(__name__)
 # mechanism to retry with increasing delays.
 standard_log_path = Path(r"C:\ProgramData\Physio-Control\MobileTouch\logging\mobiletouch.log")
 
+# using PyInstaller in windowed mode will cause sys.stdout and sys.stderr to be None
 if sys.stdout is None:
     sys.stdout = open(os.devnull, "w")
 if sys.stderr is None:
@@ -48,10 +40,11 @@ class TriggerString(enum.Enum):
     FAILED_GET_REFERENCE_TABLES = "storeAction() fail: LoadAll:getAllReferenceTables"
 
     # response should be to clear device info, cookies, and service worker
-    # this usually points a missing device info or a corrupt object store
+    # this usually points to missing device info or a corrupt object store
     FAILED_GET_DEVICE_INFO = "storeAction() fail: LoadByKey:getDeviceInfo"
 
     # The ones below require a hard reset, which is fine since the chart/app data is likely lost anyway
+
     # response should be to do a hard clear (deletion of appdata)
     # this usually points to database corruption
     CORRUPT_SCHEMA = "init schema: error: Internal error"
@@ -153,7 +146,7 @@ def read_log_file(log_path: Path=standard_log_path):
     return lines
 
 
-def parse_standard_log() -> List[LogEntry]:
+def parse_standard_log(log_path: Path = standard_log_path) -> List[LogEntry]:
     """
     Example of a standard entry:
     2025-05-26 09:33:40,383 INFO JS API: getNativeVersion returned: 2023.2.208
@@ -161,10 +154,15 @@ def parse_standard_log() -> List[LogEntry]:
 
     Reads log entries from end to beginning, as the most recent entries are at the end.
     Returns a list of LogEntry objects in reverse chronological order (newest first).
-    :return: List of LogEntry objects
+
+    Args:
+        log_path (Path, optional): Path to the log file. If None, uses standard_log_path.
+
+    Returns:
+        List[LogEntry]: List of LogEntry objects in reverse chronological order (newest first)
     """
     log_entries = []
-    lines = read_log_file(standard_log_path)
+    lines = read_log_file(log_path)
     cutoff_date = datetime.datetime.now() - datetime.timedelta(hours=2)
     for line in reversed(lines):
         try:
@@ -249,65 +247,135 @@ def register_trigger_callbacks(callbacks: dict):
         register_trigger_callback(trigger, callback)
 
 
-def main_loop():
+def main_loop(max_runtime=None, log_path=None, track_callbacks=False):
     """
     Main loop for the log parsing script.
     Continuously checks the log file and processes new entries.
     Monitors for all defined trigger strings and handles them appropriately.
     Implements a linear falloff mechanism for retries when the log file doesn't exist.
+
+    Uses multithreading to separate the monitoring of the log file from the processing of log entries.
+    Does not process log entries on initial load, only on subsequent modifications.
+
+    Args:
+        max_runtime (float, optional): Maximum time to run in seconds. If None, runs indefinitely.
+        log_path (Path, optional): Path to the log file. If None, uses standard_log_path.
+        track_callbacks (bool, optional): Whether to track which callbacks are triggered.
+
+    Returns:
+        dict: If track_callbacks is True, returns a dictionary mapping TriggerString to the number of times
+              its callback was triggered. Otherwise, returns an empty dictionary.
     """
-    # set initial to unix epoch time
-    last_modified = datetime.datetime.fromtimestamp(0)
-    last_seen_log_entry = None
-    consecutive_failures = 0
-    max_delay = 10  # Maximum delay in seconds
-    base_delay = 1   # Base delay in seconds
+    if log_path is None:
+        log_path = standard_log_path
 
-    while True:
-        try:
-            temp_last_modified = check_last_modified()
+    # For tracking callbacks
+    triggered_callbacks = {trigger: 0 for trigger in TriggerString}
 
-            # Handle case where log file doesn't exist
-            if temp_last_modified is None:
+    # Thread-safe variables
+    stop_event = threading.Event()
+    callback_lock = threading.Lock()
+
+    # Function to process log entries
+    def process_entries(entries, is_initial_load=False):
+        for entry in entries:
+            if not is_initial_load:  # Skip processing on initial load
+                logger.info(str(entry))
+                if track_callbacks:
+                    # Track which callbacks are triggered
+                    with callback_lock:
+                        for trigger in TriggerString:
+                            if trigger.value in entry.message and trigger.callback:
+                                triggered_callbacks[trigger] += 1
+                check_trigger_strings(entry)
+
+    # Function to monitor log file in a separate thread
+    def monitor_log_file():
+        # set initial to unix epoch time
+        last_modified = datetime.datetime.fromtimestamp(0)
+        last_seen_log_entry = None
+        consecutive_failures = 0
+        max_delay = 10  # Maximum delay in seconds
+        base_delay = 1   # Base delay in seconds
+        initial_load_done = False
+
+        start_time = time.time()
+
+        while not stop_event.is_set():
+            # Check if we've exceeded the maximum runtime
+            if max_runtime is not None and time.time() - start_time > max_runtime:
+                logger.info(f"Maximum runtime of {max_runtime} seconds reached. Exiting monitor thread.")
+                break
+
+            try:
+                temp_last_modified = check_last_modified(log_path)
+
+                # Handle case where log file doesn't exist
+                if temp_last_modified is None:
+                    consecutive_failures += 1
+                    # Calculate delay with linear falloff (capped at max_delay)
+                    delay = min(base_delay * consecutive_failures, max_delay)
+                    logger.debug(f"Log file not found. Retrying in {delay} seconds...")
+                    time.sleep(delay)
+                    continue
+
+                # Reset failure counter if we successfully read the file
+                consecutive_failures = 0
+
+                if temp_last_modified > last_modified:
+                    last_modified = temp_last_modified
+                    entries = parse_standard_log(log_path)
+
+                    # Initially, the newest entries will be on the end of the list
+                    if last_seen_log_entry is None and entries:
+                        last_seen_log_entry = entries[0]  # Get the most recent entry
+                        logger.info("Initial log entries loaded")
+                        logger.info(f"Last seen log entry seen at: {last_seen_log_entry.timestamp}")
+
+                        # Process initial entries but don't trigger callbacks
+                        process_entries(entries, is_initial_load=True)
+                        initial_load_done = True
+                    elif initial_load_done:
+                        logger.info(f"Log file modified at {last_modified}. Parsing new entries...")
+                        # Check for entries newer than last_seen_log_entry
+                        new_entries = [entry for entry in entries if entry.timestamp > last_seen_log_entry.timestamp]
+                        if new_entries:
+                            last_seen_log_entry = new_entries[0]  # Update to most recent entry
+                            # Process new entries and trigger callbacks
+                            process_entries(new_entries, is_initial_load=False)
+                else:
+                    # logger.debug("No new entries found.")
+                    pass
+            except Exception as e:
+                logger.error(f"An error occurred in monitor thread: {e}")
                 consecutive_failures += 1
                 # Calculate delay with linear falloff (capped at max_delay)
                 delay = min(base_delay * consecutive_failures, max_delay)
-                logger.debug(f"Log file not found. Retrying in {delay} seconds...")
                 time.sleep(delay)
-                continue
-
-            # Reset failure counter if we successfully read the file
-            consecutive_failures = 0
-
-            if temp_last_modified > last_modified:
-                last_modified = temp_last_modified
-                entries = parse_standard_log()
-                # initially, the newest entries will be on the end of the list
-                if last_seen_log_entry is None and entries:
-                    last_seen_log_entry = entries[0]  # Get the most recent entry
-                    logger.info("Initial log entries loaded")
-                    logger.info(f"Last seen log entry seen at: {last_seen_log_entry.timestamp}")
-                else:
-                    logger.info(f"Log file modified at {last_modified}. Parsing new entries...")
-                    # Check for entries newer than last_seen_log_entry
-                    new_entries = [entry for entry in entries if entry.timestamp > last_seen_log_entry.timestamp]
-                    if new_entries:
-                        last_seen_log_entry = new_entries[0]  # Update to most recent entry
-                        for entry in new_entries:
-                            logger.info(str(entry))
-                            check_trigger_strings(entry)
             else:
-                # logger.debug("No new entries found.")
-                pass
-        except Exception as e:
-            logger.error(f"An error occurred: {e}")
-            consecutive_failures += 1
-            # Calculate delay with linear falloff (capped at max_delay)
-            delay = min(base_delay * consecutive_failures, max_delay)
-            time.sleep(delay)
+                # If no exception occurred, use the base delay
+                time.sleep(base_delay)
+
+    # Start the monitor thread
+    monitor_thread = threading.Thread(target=monitor_log_file, daemon=True)
+    monitor_thread.start()
+
+    try:
+        # Wait for the monitor thread to complete or for max_runtime to be reached
+        if max_runtime is not None:
+            monitor_thread.join(max_runtime + 1)  # Add 1 second buffer
         else:
-            # If no exception occurred, use the base delay
-            time.sleep(base_delay)
+            monitor_thread.join()
+    except KeyboardInterrupt:
+        logger.info("Keyboard interrupt received. Stopping monitor thread.")
+    finally:
+        # Signal the monitor thread to stop
+        stop_event.set()
+        # Wait for the monitor thread to finish
+        if monitor_thread.is_alive():
+            monitor_thread.join(timeout=2)
+
+    return triggered_callbacks if track_callbacks else {}
 
 def handle_failed_reference_tables(entry: LogEntry):
     """
@@ -362,7 +430,8 @@ def main():
     # register_trigger_callback(TriggerString.FAILED_GET_REFERENCE_TABLES, handle_failed_reference_tables)
 
     # Start the main loop
-    main_loop()
+    # When running as the main program, we want to run indefinitely
+    main_loop(max_runtime=None, log_path=standard_log_path, track_callbacks=False)
 
     # check_last_modified()
     # entries = parse_standard_log()

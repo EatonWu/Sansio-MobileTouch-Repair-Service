@@ -1,6 +1,6 @@
-# MobileTouch Tools
+# MobileTouch Repair Service 
 
-This project provides tools for working with MobileTouch application and fixing common issues.
+This project provides tools for working with Sansio's MobileTouch application and fixing common issues (database corruptions)
 
 ## Overview
 
@@ -10,7 +10,7 @@ The MobileTouch Tools project includes several utilities to help diagnose and fi
 2. **Log Parser** - Analyzes MobileTouch logs to detect and respond to errors
 3. **Test Archives Tools** - Tools for testing with saved application states (see [TESTING.md](TESTING.md))
 
-## Tools
+## Relevant files
 
 ### mobiletouch_tools.py
 

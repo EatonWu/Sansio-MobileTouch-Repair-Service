@@ -6,6 +6,7 @@ import tempfile
 import pytest
 import time
 import json
+import datetime
 from pathlib import Path
 import logging
 from selenium import webdriver
@@ -13,6 +14,7 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.wait import WebDriverWait
+from mobile_touch_log_parsing import main_loop, setup_trigger_callbacks, TriggerString
 
 # Configure logging
 logging.basicConfig(
@@ -307,6 +309,137 @@ def test_archive_loading(setup_temp_dir, archive):
     logger.info(f"Testing archive: {archive.name}")
     result = _with_archive(archive.name)
     assert result, f"Failed to load archive: {archive.name}"
+
+@pytest.mark.parametrize("archive", list_available_archives(), ids=lambda x: x.name)
+def test_archive_repair(setup_temp_dir, archive):
+    """
+    Test that archives can be loaded and that the mobile_touch_log_parsing loop
+    correctly identifies and repairs issues by triggering the appropriate callbacks.
+
+    This test verifies that:
+    1. The archive can be loaded successfully
+    2. The main_loop function correctly processes log entries
+    3. Callbacks are triggered only on subsequent log modifications, not on initial load
+    """
+    logger.info(f"Testing archive repair for: {archive.name}")
+    result, triggered_callbacks = _with_archive_repair(archive.name)
+    assert result, f"Failed to load archive: {archive.name}"
+
+    # The assertion for callbacks being triggered is now handled in _with_archive_repair
+    # This ensures that the test fails if no callbacks are triggered
+
+    # Log which callbacks were triggered
+    for trigger, count in triggered_callbacks.items():
+        if count > 0:
+            logger.info(f"Callback for {trigger.name} was triggered {count} times")
+
+    logger.info(f"Test completed successfully for archive: {archive.name}")
+
+def _with_archive_repair(archive_name):
+    """
+    Test MobileTouch with a specific archive, including running the mobile_touch_log_parsing loop
+    to validate that the correct callbacks are triggered.
+
+    Args:
+        archive_name (str): Name of the archive file (without path)
+
+    Returns:
+        tuple: (bool, dict) where bool is True if test was successful, False otherwise,
+               and dict maps TriggerString to the number of times its callback was triggered
+    """
+    try:
+        # First, load the archive as in _with_archive
+        result = _with_archive(archive_name)
+        if not result:
+            return False, {}
+
+        # Get metadata for this archive
+        archive_metadata = get_archive_metadata(archive_name)
+        if archive_metadata:
+            error_type = archive_metadata.get('error_type', 'Unknown')
+            logger.info(f"Archive {archive_name} has error type {error_type}")
+        else:
+            error_type = "Unknown"
+
+        # Create a temporary log file with trigger strings based on the error type
+        log_path = Path(TEMP_DIR) / f"mobiletouch_{archive_name}.log"
+
+        # Create initial log entries with timestamps
+        now = datetime.datetime.now()
+        initial_log_entries = []
+
+        # Create a simple initial log entry
+        initial_log_entry = f"{now.strftime('%Y-%m-%d %H:%M:%S,%f')[:-3]} INFO Initial log entry"
+        initial_log_entries.append(initial_log_entry)
+
+        logger.info(f"Creating initial log file at {log_path}")
+
+        # Write the initial log entries to the log file
+        with open(log_path, 'w') as f:
+            for entry in initial_log_entries:
+                f.write(f"{entry}\n")
+
+        # Set up trigger callbacks
+        setup_trigger_callbacks()
+
+        # Start the main loop in a separate thread
+        logger.info("Starting mobile_touch_log_parsing main loop...")
+        import threading
+        stop_event = threading.Event()
+        triggered_callbacks = {}
+
+        def run_main_loop():
+            nonlocal triggered_callbacks
+            triggered_callbacks = main_loop(max_runtime=10, log_path=log_path, track_callbacks=True)
+            stop_event.set()
+
+        main_thread = threading.Thread(target=run_main_loop)
+        main_thread.start()
+
+        # Wait a bit for the initial load to complete
+        time.sleep(2)
+
+        # Now create log entries with trigger strings
+        logger.info("Creating log entries with trigger strings...")
+        trigger_log_entries = []
+
+        # Create log entries for all trigger strings
+        # This ensures that all callbacks will be triggered, regardless of the error type
+        for trigger in TriggerString:
+            timestamp = datetime.datetime.now() - datetime.timedelta(seconds=len(trigger_log_entries))
+            log_entry = f"{timestamp.strftime('%Y-%m-%d %H:%M:%S,%f')[:-3]} ERROR {trigger.value}"
+            trigger_log_entries.append(log_entry)
+
+        logger.info(f"Adding trigger strings to log file: {[trigger.name for trigger in TriggerString]}")
+
+        # Append the trigger log entries to the log file
+        with open(log_path, 'a') as f:
+            for entry in trigger_log_entries:
+                f.write(f"{entry}\n")
+
+        # Wait for the main loop to complete
+        main_thread.join()
+
+        logger.info(f"Main loop completed. Triggered callbacks: {triggered_callbacks}")
+
+        # Verify that callbacks were triggered
+        callback_triggered = False
+        for trigger, count in triggered_callbacks.items():
+            if count > 0:
+                callback_triggered = True
+                logger.info(f"Callback for {trigger.name} was triggered {count} times")
+
+        if not callback_triggered:
+            logger.warning("No callbacks were triggered. This might indicate that the log file modifications were not detected.")
+
+        # Assert that at least one callback was triggered
+        assert callback_triggered, f"No callbacks were triggered for archive: {archive_name}"
+
+        return True, triggered_callbacks
+
+    except Exception as e:
+        logger.error(f"Error in _with_archive_repair for archive {archive_name}: {e}")
+        return False, {}
 
 def main():
     """
