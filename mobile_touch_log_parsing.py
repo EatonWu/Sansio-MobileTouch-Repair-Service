@@ -1,11 +1,35 @@
 import datetime
 import enum
+import logging
 import os
 import sys
 import time
 from pathlib import Path
 from typing import Callable, List
 
+# Configure logging
+# This logging configuration replaces direct prints to stderr with a more flexible logging system.
+# Benefits:
+# 1. Different log levels (DEBUG, INFO, WARNING, ERROR, CRITICAL) for different types of messages
+# 2. Consistent formatting of log messages
+# 3. Easy redirection of logs to a file instead of stdout/stderr
+# 4. Control over log verbosity through the level setting
+#
+# To log to a file instead of stdout, uncomment the FileHandler line below.
+# To change the log level, modify the level parameter (e.g., logging.DEBUG for more verbose logging).
+logging.basicConfig(
+    level=logging.DEBUG,  # Set to logging.DEBUG for more verbose output
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        # Uncomment the line below to log to a file instead of stdout
+        # logging.FileHandler('mobile_touch_log_parsing.log'),
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# Path to the standard log file. If this path doesn't exist, the program will use a linear falloff
+# mechanism to retry with increasing delays.
 standard_log_path = Path(r"C:\ProgramData\Physio-Control\MobileTouch\logging\mobiletouch.log")
 
 if sys.stdout is None:
@@ -113,17 +137,18 @@ def read_log_file(log_path: Path=standard_log_path):
     Reads the log file into memory and then immediately closes it.
     The largest log file I've observed is 10,241 KB, which is manageable to store in memory.
     :param log_path: Path to the log file
-    :return: a list of lines from the log file
+    :return: a list of lines from the log file, or an empty list if the file doesn't exist
     """
     if not log_path.exists():
-        raise FileNotFoundError(f"Log file does not exist: {log_path}")
+        logger.debug(f"Log file does not exist: {log_path}")
+        return []
     lines = []
-    try :
+    try:
         with log_path.open('r', encoding='utf-8') as file:
             for line in file:
                 lines.append(line.strip())
     except Exception as e:
-        print(f"Error reading log file: {e}", file=sys.stderr)
+        logger.error(f"Error reading log file: {e}")
 
     return lines
 
@@ -144,12 +169,12 @@ def parse_standard_log() -> List[LogEntry]:
     for line in reversed(lines):
         try:
             entry = log_entry_from_line(line)
-            # print(f"Processing log entry: {entry}")
+            # logger.debug(f"Processing log entry: {entry}")
             if entry.timestamp < cutoff_date:
                 break
             log_entries.append(entry)
         except ValueError as e:
-            print(f"Skipping invalid log entry: {e}", file=sys.stderr)
+            logger.warning(f"Skipping invalid log entry: {e}")
 
     return log_entries
 
@@ -176,11 +201,11 @@ def discard_older_than(log_entries, days: int):
 def check_last_modified(log_file: Path = standard_log_path):
     """
     Checks the last modified date of the log file
-    :param log_entries:
-    :return:
+    :param log_file: Path to the log file
+    :return: Last modified datetime or None if file doesn't exist
     """
     if not log_file.exists():
-        raise FileNotFoundError(f"Log file does not exist: {log_file}")
+        return None
     last_modified = log_file.stat().st_mtime
     last_modified_date = datetime.datetime.fromtimestamp(last_modified)
     return last_modified_date
@@ -195,7 +220,7 @@ def check_trigger_strings(entry: LogEntry):
     """
     for trigger in TriggerString:
         if trigger.value in entry.message:
-            print(f"Detected trigger string {trigger.name}: {entry}")
+            logger.info(f"Detected trigger string {trigger.name}: {entry}")
             if trigger.callback:
                 trigger.callback(entry)
             return True
@@ -229,44 +254,67 @@ def main_loop():
     Main loop for the log parsing script.
     Continuously checks the log file and processes new entries.
     Monitors for all defined trigger strings and handles them appropriately.
+    Implements a linear falloff mechanism for retries when the log file doesn't exist.
     """
     # set initial to unix epoch time
     last_modified = datetime.datetime.fromtimestamp(0)
     last_seen_log_entry = None
+    consecutive_failures = 0
+    max_delay = 10  # Maximum delay in seconds
+    base_delay = 1   # Base delay in seconds
+
     while True:
         try:
             temp_last_modified = check_last_modified()
+
+            # Handle case where log file doesn't exist
+            if temp_last_modified is None:
+                consecutive_failures += 1
+                # Calculate delay with linear falloff (capped at max_delay)
+                delay = min(base_delay * consecutive_failures, max_delay)
+                logger.debug(f"Log file not found. Retrying in {delay} seconds...")
+                time.sleep(delay)
+                continue
+
+            # Reset failure counter if we successfully read the file
+            consecutive_failures = 0
+
             if temp_last_modified > last_modified:
                 last_modified = temp_last_modified
                 entries = parse_standard_log()
                 # initially, the newest entries will be on the end of the list
                 if last_seen_log_entry is None and entries:
                     last_seen_log_entry = entries[0]  # Get the most recent entry
-                    print("Initial log entries loaded")
-                    print("Last seen log entry seen at:", last_seen_log_entry.timestamp)
+                    logger.info("Initial log entries loaded")
+                    logger.info(f"Last seen log entry seen at: {last_seen_log_entry.timestamp}")
                 else:
-                    print(f"Log file modified at {last_modified}. Parsing new entries...")
+                    logger.info(f"Log file modified at {last_modified}. Parsing new entries...")
                     # Check for entries newer than last_seen_log_entry
                     new_entries = [entry for entry in entries if entry.timestamp > last_seen_log_entry.timestamp]
                     if new_entries:
                         last_seen_log_entry = new_entries[0]  # Update to most recent entry
                         for entry in new_entries:
-                            print(entry)
+                            logger.info(str(entry))
                             check_trigger_strings(entry)
             else:
-                # print("No new entries found.")
+                # logger.debug("No new entries found.")
                 pass
         except Exception as e:
-            print(f"An error occurred: {e}", file=sys.stderr)
-        finally:
-            time.sleep(1)
+            logger.error(f"An error occurred: {e}")
+            consecutive_failures += 1
+            # Calculate delay with linear falloff (capped at max_delay)
+            delay = min(base_delay * consecutive_failures, max_delay)
+            time.sleep(delay)
+        else:
+            # If no exception occurred, use the base delay
+            time.sleep(base_delay)
 
 def handle_failed_reference_tables(entry: LogEntry):
     """
     Example callback function for FAILED_GET_REFERENCE_TABLES trigger.
     In a real implementation, this would clear reference tables.
     """
-    print(f"ACTION: Clearing reference tables due to: {entry.message}")
+    logger.info(f"ACTION: Clearing reference tables due to: {entry.message}")
 
 
 def handle_failed_device_info(entry: LogEntry):
@@ -274,7 +322,7 @@ def handle_failed_device_info(entry: LogEntry):
     Example callback function for FAILED_GET_DEVICE_INFO trigger.
     In a real implementation, this would clear device info, cookies, and service worker.
     """
-    print(f"ACTION: Clearing device info, cookies, and service worker due to: {entry.message}")
+    logger.info(f"ACTION: Clearing device info, cookies, and service worker due to: {entry.message}")
 
 
 def handle_corrupt_schema(entry: LogEntry):
@@ -282,7 +330,7 @@ def handle_corrupt_schema(entry: LogEntry):
     Example callback function for CORRUPT_SCHEMA trigger.
     In a real implementation, this would perform a hard clear (deletion of appdata).
     """
-    print(f"ACTION: Performing hard clear (deletion of appdata) due to: {entry.message}")
+    logger.info(f"ACTION: Performing hard clear (deletion of appdata) due to: {entry.message}")
 
 
 def handle_stores_not_set_up(entry: LogEntry):
@@ -290,7 +338,7 @@ def handle_stores_not_set_up(entry: LogEntry):
     Example callback function for STORES_NOT_CORRECTLY_SET_UP trigger.
     In a real implementation, this would perform a hard clear (deletion of appdata).
     """
-    print(f"ACTION: Performing hard clear (deletion of appdata) due to: {entry.message}")
+    logger.info(f"ACTION: Performing hard clear (deletion of appdata) due to: {entry.message}")
 
 
 def setup_trigger_callbacks():
@@ -316,17 +364,15 @@ def main():
     # Start the main loop
     main_loop()
 
-    # The following code will not be reached during normal operation
-    # because main_loop() runs indefinitely
-    check_last_modified()
-    entries = parse_standard_log()
-
-    for entry in entries:
-        print(entry)
+    # check_last_modified()
+    # entries = parse_standard_log()
+    #
+    # for entry in entries:
+    #     print(entry)
 
 if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        print(f"An error occurred: {e}", file=sys.stderr)
+        logger.error(f"An error occurred: {e}")
         sys.exit(1)
