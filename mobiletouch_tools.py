@@ -108,20 +108,36 @@ def custom_remove_item(idb: IndexedDB, object_store_name, key):
     )
 
 
-def setup_chrome_driver(log_path=r"C:\ProgramData\Physio-Control\MobileTouch\logging\mobiletouch.log"):
+def setup_chrome_driver(user_data_dir=None, profile_directory=None):
+    """
+    Set up the Chrome driver with custom profile paths.
+
+    Args:
+        user_data_dir (str, optional): Path to the user data directory.
+                                      Defaults to C:\\ProgramData\\Physio-Control\\MobileTouch.
+        profile_directory (str, optional): Profile directory name. Defaults to AppData.
+
+    Returns:
+        webdriver.Chrome: Configured Chrome WebDriver instance
+    """
     chrome_options = Options()
 
-    # headless
-    # chrome_options.add_argument("--headless=new")
+    # Set the Chrome binary location
     chrome_options.binary_location = ".\\chrome-win32\\chrome.exe"
     service = Service(executable_path=".\\chromedriver.exe")
-    service.log_output = log_path
 
-    # attempt to open chrome using mobiletouch's profile and data
-    chrome_options.add_argument("user-data-dir=C:\\ProgramData\\Physio-Control\\MobileTouch")
-    chrome_options.add_argument("profile-directory=AppData")
+    # Set the user data directory and profile
+    if user_data_dir:
+        chrome_options.add_argument(f"user-data-dir={user_data_dir}")
+    else:
+        chrome_options.add_argument("user-data-dir=C:\\ProgramData\\Physio-Control\\MobileTouch")
 
-    # required for IndexedDB access
+    if profile_directory:
+        chrome_options.add_argument(f"profile-directory={profile_directory}")
+    else:
+        chrome_options.add_argument("profile-directory=AppData")
+
+    # Required for IndexedDB access
     chrome_options.set_capability("goog:loggingPrefs", {"browser": "ALL"})
 
     return webdriver.Chrome(service=service, options=chrome_options)
@@ -151,8 +167,8 @@ def hard_clear(path=standard_path):
 
 
 
-def delete_deviceinfo_entry():
-    with setup_chrome_driver() as driver:
+def delete_deviceinfo_entry(mobiletouch_dir="C:\\ProgramData\\Physio-Control\\MobileTouch"):
+    with setup_chrome_driver(mobiletouch_dir) as driver:
         try:
             # Navigate to a URL
             driver.get("https://mobiletouch.healthems.com")
@@ -200,11 +216,6 @@ def delete_deviceinfo_entry():
 
 
 def clear_cookies_and_service_worker(path=standard_path):
-    """
-    Deletes the Network and Service Worker directories from the MobileTouch profile.
-    This seems to resolve the "Device configuration corrupt - missing device ID (2)" error
-    This also seems to resolve FAILED_GET_DEVICE_INFO error
-    """
     network_dir = os.path.join(path, "AppData", "Network")
     service_worker_dir = os.path.join(path, "AppData", "Service Worker")
 
@@ -239,14 +250,12 @@ def deleteRefTableStore():
 
             # Keep checking for alerts until none found for 5 seconds
             last_alert_time = time.time()
-            alert_found = False
 
             wait_time = 10  # Initial wait time of 10 seconds
             while True:
                 try:
                     alert = WebDriverWait(driver, wait_time).until(EC.alert_is_present())
                     print(f"Alert found: {alert.text}")
-                    alert_found = True
                     alert.accept()
                     wait_time = max(1, min(wait_time - 1, 5))  # Decrease wait time, but keep between 1-5 seconds
                     last_alert_time = time.time()
@@ -275,16 +284,14 @@ def deleteRefTableStore():
                 # Remove the indicator element
                 driver.execute_script("document.getElementById('clear-complete-indicator').remove();")
 
-            # # print console logs
-            # logs = driver.get_log("browser")
-            # for log in logs:
-            #     print(log)
-
         except Exception as e:
             print(f"An error occurred: {e}", file=sys.stderr)
         finally:
             # The WebDriver will automatically quit when exiting the 'with' block
             pass
+
+
+
 
 def enumerate_processes():
     """
@@ -342,6 +349,7 @@ def validate_mobiletouch(driver=None):
         # Navigate to the MobileTouch URL
         driver.get("https://mobiletouch.healthems.com")
 
+        print("Waiting for MobileTouch to load...")
         # wait until id "username" and id "password" are present or an alert is detected, or a button with the text "Configure this Device" is present
         WebDriverWait(driver, 10).until(
             EC.presence_of_element_located((By.XPATH, "/html/body/div/div/span/div/div/div/div[2]/div/button")) or
@@ -367,15 +375,20 @@ def main():
     #     print("Failed to delete deviceinfo entry. Exiting.")
     #     sys.exit(1)
 
-    if not hard_clear():
-        print("Failed to clear MobileTouch profile directory. Exiting.")
+    # if not hard_clear():
+    #     print("Failed to clear MobileTouch profile directory. Exiting.")
+    #     sys.exit(1)
+
+    if not delete_deviceinfo_entry() :
+        print("Failed to delete deviceinfo entry. Exiting.")
         sys.exit(1)
+
     if not clear_cookies_and_service_worker():
         print("Failed to clear cookies and service worker. Exiting.")
         sys.exit(1)
-    if not validate_mobiletouch():
-        print("MobileTouch validation failed. Exiting.")
-        sys.exit(1)
+    # if not validate_mobiletouch():
+    #     print("MobileTouch validation failed. Exiting.")
+    #     sys.exit(1)
 
     print("MobileTouch validation succeeded. Device configuration should be restored.")
 

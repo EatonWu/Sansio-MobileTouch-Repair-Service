@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Callable, List
 from threading import Event
 
+import mobiletouch_tools
+
 # Configure logging
 # This logging configuration replaces direct prints to stderr with a more flexible logging system.
 # Benefits:
@@ -23,8 +25,6 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(sys.stdout),
-        # Uncomment the line below to log to a file instead of stdout
-        # logging.FileHandler('mobile_touch_log_parsing.log'),
     ]
 )
 logger = logging.getLogger(__name__)
@@ -74,12 +74,12 @@ class TriggerString(enum.Enum):
         return self._callback
 
     @callback.setter
-    def callback(self, func: Callable[['LogEntry'], None]):
+    def callback(self, func: Callable[['LogEntry', Path], None]):
         """
         Set a callback function to be called when this trigger string is detected.
-
+    
         Args:
-            func: A function that takes a LogEntry as its argument and returns None.
+            func: A function that takes a LogEntry and Path as arguments and returns None.
         """
         self._callback = func
 
@@ -108,6 +108,25 @@ class LogLevel(enum.Enum):
     def __init__(self, level):
         self._value_ = level
 
+    @staticmethod
+    def from_string(level: str):
+        """
+        Returns the LogLevel that matches the given string.
+        :param level: The log level as a string.
+        :return: LogLevel if found, otherwise INFO.
+        """
+        try:
+            if level == 'SEVERE':
+                return LogLevel.ERROR
+
+            return LogLevel[level.upper()]
+        except KeyError:
+            logger.warning(f"Invalid log level '{level}', defaulting to INFO.")
+            return LogLevel.INFO
+
+    def __str__(self):
+        return self._value_
+
 
 class LogEntry:
     """
@@ -123,11 +142,11 @@ class LogEntry:
         except ValueError as e:
             # print(f"Error parsing timestamp '{timestamp}': {e}", file=sys.stderr)
             raise ValueError(f"Invalid timestamp format: {timestamp}")
-        self.level = LogLevel(level) if level in LogLevel.__members__ else LogLevel.INFO
+        self.level = LogLevel.from_string(level) if level else LogLevel.INFO
         self.message = message
 
     def __str__(self):
-        return f"{self.timestamp} {self.level} {self.message}"
+        return f"{datetime.datetime.strftime(self.timestamp, '%Y-%m-%d %H:%M:%S,%f')[:-3]} {self.level} {self.message}"
 
 
 def log_entry_from_line(line: str):
@@ -242,13 +261,13 @@ def check_trigger_strings(entry: LogEntry):
     return False
 
 
-def register_trigger_callback(trigger: TriggerString, callback: Callable[[LogEntry], None]):
+def register_trigger_callback(trigger: TriggerString, callback: Callable[[LogEntry, Path], None]):
     """
     Register a callback function for a specific trigger string.
 
     Args:
         trigger: The TriggerString to register the callback for
-        callback: A function that takes a LogEntry as its argument and returns None
+        callback: A function that takes a LogEntry and Path as arguments and returns None
     """
     trigger.callback = callback
 
@@ -349,23 +368,31 @@ def main_loop(stop_event: Event = None, logs_loaded_event: Event = None,log_file
             # If no exception occurred, use the base delay
             time.sleep(base_delay)
 
-def handle_failed_reference_tables(entry: LogEntry):
+
+def handle_failed_reference_tables(entry: LogEntry=None, file_path: Path=None):
     """
     Example callback function for FAILED_GET_REFERENCE_TABLES trigger.
     In a real implementation, this would clear reference tables.
     """
-    logger.info(f"ACTION: Clearing reference tables due to: {entry.message}")
+    if entry is not None:
+        logger.info(f"ACTION: Clearing reference tables due to: {entry.message}")
+
+    mobiletouch_tools.deleteRefTableStore()
 
 
-def handle_failed_device_info(entry: LogEntry):
+def handle_failed_device_info(entry: LogEntry, mobiletouch_path: Path):
     """
     Example callback function for FAILED_GET_DEVICE_INFO trigger.
     In a real implementation, this would clear device info, cookies, and service worker.
     """
-    logger.info(f"ACTION: Clearing device info, cookies, and service worker due to: {entry.message}")
+    if entry is not None:
+        logger.info(f"ACTION: Clearing device info, cookies, and service worker due to: {entry.message}")
+    mobiletouch_tools.kill_mobiletouch_process()
+    mobiletouch_tools.delete_deviceinfo_entry(mobiletouch_path)
+    mobiletouch_tools.clear_cookies_and_service_worker(mobiletouch_path)
 
 
-def handle_corrupt_schema(entry: LogEntry):
+def handle_corrupt_schema(entry: LogEntry, file_path: Path):
     """
     Example callback function for CORRUPT_SCHEMA trigger.
     In a real implementation, this would perform a hard clear (deletion of appdata).
@@ -373,7 +400,7 @@ def handle_corrupt_schema(entry: LogEntry):
     logger.info(f"ACTION: Performing hard clear (deletion of appdata) due to: {entry.message}")
 
 
-def handle_stores_not_set_up(entry: LogEntry):
+def handle_stores_not_set_up(entry: LogEntry, file_path: Path):
     """
     Example callback function for STORES_NOT_CORRECTLY_SET_UP trigger.
     In a real implementation, this would perform a hard clear (deletion of appdata).
@@ -381,15 +408,33 @@ def handle_stores_not_set_up(entry: LogEntry):
     logger.info(f"ACTION: Performing hard clear (deletion of appdata) due to: {entry.message}")
 
 
+default_callbacks = {
+    TriggerString.FAILED_GET_REFERENCE_TABLES: handle_failed_reference_tables,
+    TriggerString.FAILED_GET_DEVICE_INFO: handle_failed_device_info,
+    TriggerString.CORRUPT_SCHEMA: handle_corrupt_schema,
+    TriggerString.STORES_NOT_CORRECTLY_SET_UP: handle_stores_not_set_up
+}
+
+def get_default_callback_dict():
+    return default_callbacks
+
 def setup_trigger_callbacks():
     """
     Set up callback functions for all trigger strings.
     """
+    register_trigger_callbacks(default_callbacks)
+    
+
+def setup_test_callbacks():
+    """
+    Set up test callback functions for all trigger strings.
+    This is useful for unit testing or debugging purposes.
+    """
     callbacks = {
-        TriggerString.FAILED_GET_REFERENCE_TABLES: handle_failed_reference_tables,
-        TriggerString.FAILED_GET_DEVICE_INFO: handle_failed_device_info,
-        TriggerString.CORRUPT_SCHEMA: handle_corrupt_schema,
-        TriggerString.STORES_NOT_CORRECTLY_SET_UP: handle_stores_not_set_up
+        TriggerString.FAILED_GET_REFERENCE_TABLES: lambda entry, path: logger.info(f"Test callback for {entry.message}"),
+        TriggerString.FAILED_GET_DEVICE_INFO: lambda entry, path: logger.info(f"Test callback for {entry.message}"),
+        TriggerString.CORRUPT_SCHEMA: lambda entry, path: logger.info(f"Test callback for {entry.message}"),
+        TriggerString.STORES_NOT_CORRECTLY_SET_UP: lambda entry, path: logger.info(f"Test callback for {entry.message}")
     }
     register_trigger_callbacks(callbacks)
 

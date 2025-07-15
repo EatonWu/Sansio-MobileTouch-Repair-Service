@@ -1,5 +1,6 @@
 import os
 import sys
+import traceback
 import zipfile
 import shutil
 import tempfile
@@ -15,7 +16,14 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.wait import WebDriverWait
-from mobile_touch_log_parsing import main_loop, setup_trigger_callbacks, TriggerString, register_trigger_callback
+
+import mobile_touch_log_parsing
+import mobiletouch_tools
+from mobile_touch_log_parsing import main_loop, setup_trigger_callbacks, TriggerString, register_trigger_callback, \
+    LogEntry, setup_test_callbacks
+from mobiletouch_tools import validate_mobiletouch, setup_chrome_driver
+
+standard_path = os.path.dirname("C:\\ProgramData\\Physio-Control\\MobileTouch\\")
 
 # Configure logging
 logging.basicConfig(
@@ -34,39 +42,6 @@ METADATA_FILE = TEST_ARCHIVES_DIR / "metadata.json"
 # Temporary directory for extracted archives
 TEMP_DIR = Path(tempfile.gettempdir()) / "mobiletouch_test_archives"
 
-def setup_chrome_driver(user_data_dir=None, profile_directory=None):
-    """
-    Set up the Chrome driver with custom profile paths.
-
-    Args:
-        user_data_dir (str, optional): Path to the user data directory. 
-                                      Defaults to C:\\ProgramData\\Physio-Control\\MobileTouch.
-        profile_directory (str, optional): Profile directory name. Defaults to AppData.
-
-    Returns:
-        webdriver.Chrome: Configured Chrome WebDriver instance
-    """
-    chrome_options = Options()
-
-    # Set the Chrome binary location
-    chrome_options.binary_location = ".\\chrome-win32\\chrome.exe"
-    service = Service(executable_path=".\\chromedriver.exe")
-
-    # Set the user data directory and profile
-    if user_data_dir:
-        chrome_options.add_argument(f"user-data-dir={user_data_dir}")
-    else:
-        chrome_options.add_argument("user-data-dir=C:\\ProgramData\\Physio-Control\\MobileTouch")
-
-    if profile_directory:
-        chrome_options.add_argument(f"profile-directory={profile_directory}")
-    else:
-        chrome_options.add_argument("profile-directory=AppData")
-
-    # Required for IndexedDB access
-    chrome_options.set_capability("goog:loggingPrefs", {"browser": "ALL"})
-
-    return webdriver.Chrome(service=service, options=chrome_options)
 
 def extract_archive(archive_path, extract_to=None):
     """
@@ -310,7 +285,7 @@ def test_archive_loading(setup_temp_dir, archive):
     assert result, f"Failed to load archive: {archive.name}"
 
 @pytest.mark.parametrize("archive", list_available_archives(), ids=lambda x: x.name)
-def test_archive_repair_fake_logs(setup_temp_dir, archive):
+def test_archive_parsing_fake_logs(setup_temp_dir, archive):
     """
     Test that archives can be loaded and that the mobile_touch_log_parsing loop
     correctly identifies and repairs issues by triggering the appropriate callbacks.
@@ -325,7 +300,7 @@ def test_archive_repair_fake_logs(setup_temp_dir, archive):
     3. Callbacks are triggered only on subsequent log modifications, not on initial load
     """
     logger.info(f"Testing archive repair with fake logs for: {archive.name}")
-    result, triggered_callbacks = _with_archive_repair_fake_logs(archive.name)
+    result, triggered_callbacks = _with_archive_parse_fake_logs(archive.name)
     assert result, f"Failed to load archive: {archive.name}"
 
     # The assertion for callbacks being triggered is now handled in _with_archive_repair_fake_logs
@@ -348,11 +323,44 @@ def test_epcr059_fake_logs():
     clean_temp_directories()
     archive_name = "EPCR059 (CF-20) MobileTouch Unexpected Error.zip"
     logger.info(f"Testing specific archive: {archive_name}")
-    result = _with_archive_repair_fake_logs(archive_name)
+    result = _with_archive_parse_fake_logs(archive_name)
     assert result, f"Fake log test failed for archive: {archive_name}"
 
+
+def test_epcr059_real_logs():
+    """
+    Test the specific archive for EPCR059 error type with real logs.
+
+    This test is designed to ensure that the archive with EPCR059 error type
+    can be loaded and processed correctly using real logs.
+    """
+    clean_temp_directories()
+    archive_name = "EPCR059 (CF-20) MobileTouch Unexpected Error.zip"
+    logger.info(f"Testing specific archive with real logs: {archive_name}")
+    result, triggered_callbacks = _with_archive_parse_real_logs(archive_name)
+    assert result, f"Real log test failed for archive: {archive_name}"
+
+    # Log which callbacks were triggered
+    for trigger, count in triggered_callbacks.items():
+        if count > 0:
+            logger.info(f"Callback for {trigger.name} was triggered {count} times")
+
+
+def test_epcr059_repair_metadata():
+    """
+    Test the specific archive for EPCR059 error type with metadata repair.
+
+    This test is designed to ensure that the archive with EPCR059 error type
+    can be repaired using metadata and processed correctly.
+    """
+    clean_temp_directories()
+    archive_name = "EPCR059 (CF-20) MobileTouch Unexpected Error.zip"
+    logger.info(f"Testing specific archive repair from metadata: {archive_name}")
+    result = _with_archive_repair_from_metadata(archive_name)
+    assert result, f"Repair from metadata failed for archive: {archive_name}"
+
 @pytest.mark.parametrize("archive", list_available_archives(), ids=lambda x: x.name)
-def test_archive_repair_real_logs(setup_temp_dir, archive):
+def test_archive_parsing_real_logs(setup_temp_dir, archive):
     """
     Test that archives can be loaded and that the mobile_touch_log_parsing loop
     correctly identifies and repairs issues by triggering the appropriate callbacks.
@@ -365,7 +373,7 @@ def test_archive_repair_real_logs(setup_temp_dir, archive):
     3. Callbacks are triggered based on the actual log entries in the archive
     """
     logger.info(f"Testing archive repair with real logs for: {archive.name}")
-    result, triggered_callbacks = _with_archive_repair_real_logs(archive.name)
+    result, triggered_callbacks = _with_archive_parse_real_logs(archive.name)
     assert result, f"Failed to load archive: {archive.name}"
 
     # Log which callbacks were triggered
@@ -377,7 +385,15 @@ def test_archive_repair_real_logs(setup_temp_dir, archive):
 
     assert callback_triggered, f"No callbacks were triggered for archive: {archive.name}. This might indicate that the real logs with trigger strings were not generated or detected."
 
-def _with_archive_repair_fake_logs(archive_name):
+
+@pytest.mark.parametrize("archive", list_available_archives(), ids=lambda x: x.name)
+def test_archive_repair_from_metadata(setup_temp_dir, archive):
+    logger.info(f"Testing archive repair from metadata for: {archive.name}")
+    result = _with_archive_repair_from_metadata(archive.name)
+    assert result, f"Failed to repair archive: {archive.name}"
+
+
+def _with_archive_parse_fake_logs(archive_name):
     """
     Test MobileTouch with a specific archive, including running the mobile_touch_log_parsing loop
     to validate that the correct callbacks are triggered.
@@ -515,7 +531,7 @@ def _with_archive_repair_fake_logs(archive_name):
         return False, {}
 
 
-def _with_archive_repair_real_logs(archive_name):
+def _with_archive_parse_real_logs(archive_name):
     """
     Test MobileTouch with a specific archive, including running the mobile_touch_log_parsing loop
     to validate that the correct callbacks are triggered.
@@ -620,10 +636,8 @@ def _with_archive_repair_real_logs(archive_name):
             driver.get("https://mobiletouch.healthems.com")
 
             last_alert_time = time.time()
-            wait_time = 15  # Initial wait time of 15 seconds
-
-            time.sleep(30)
-
+            wait_time = 10  # Initial wait time of 15 seconds
+            logs = []
             while True:
                 try:
                     alert = WebDriverWait(driver, wait_time).until(EC.alert_is_present())
@@ -635,12 +649,30 @@ def _with_archive_repair_real_logs(archive_name):
                     # If no alert found for 5 seconds, break the loop
                     if time.time() - last_alert_time > 1:
                         print("No new alerts for 5 seconds, continuing...")
+                        logger.info("Retrieving browser logs...")
+                        logs = driver.get_log("browser")
                         break
         finally:
             # Close the driver
             driver.quit()
 
-        # Wait for the main loop to complete
+        for log in logs:
+            timestamp = datetime.datetime.fromtimestamp(log['timestamp'] / 1000.0)
+            log_level = log['level']
+            message = log['message']
+            timestamp_str = timestamp.strftime('%Y-%m-%d %H:%M:%S,%f')[:-3]  # Format to match log entry format
+            try:
+                log_entry = LogEntry(timestamp_str, log_level, message)
+                logger.info(f"Log entry created: {log_entry}")
+                with open(log_path, 'a') as log_file:
+                    log_file.write(f"{str(log_entry)}\n")
+                time.sleep(0.5)
+            except Exception as e:
+                logger.error(f"Error creating LogEntry: {e}")
+                continue
+
+        # Allow some time for the main loop to process the logs
+        time.sleep(10)
 
         stop_event.set()
         main_thread.join()
@@ -655,10 +687,106 @@ def _with_archive_repair_real_logs(archive_name):
                 logger.info(f"Callback for {trigger.name} was triggered {count} times")
 
         assert callback_triggered, f"No callbacks were triggered for archive {archive_name}. This might indicate that the real logs with trigger strings were not generated or detected."
-        return None
+        return True, triggered_callbacks
     except Exception as e:
         logger.error(f"Error in _with_archive_repair_real_logs for archive {archive_name}: {e}")
         return False, {}
+
+def _with_archive_repair_from_metadata(archive_name):
+    """
+    Loads the specified archive, extracts it, and processes the log file, performs the
+    repair mapped from the metadata file. It should be fixed at this point, which we
+    can validate using the validate_mobiletouch() function from mobiletouch_tools.py
+
+    Args:
+        archive_name (str): Name of the archive file (without path)
+
+    Returns:
+        bool: True if test was successful, False otherwise
+    """
+    try:
+        # Get metadata for this archive
+        archive_metadata = get_archive_metadata(archive_name)
+        if not archive_metadata:
+            logger.error(f"No metadata found for archive {archive_name}")
+            return False
+
+        error_type_name = archive_metadata.get('error_type', 'UNKNOWN')
+
+        # Get the TriggerString enum value directly by name
+        try:
+            error_type = getattr(TriggerString, error_type_name)
+        except AttributeError:
+            logger.warning(f"Unknown error type: {error_type_name}, using UNKNOWN")
+            error_type = TriggerString.UNKNOWN
+
+        logger.info(f"Archive {archive_name} has error type {error_type}")
+
+        # Extract the archive first to find the log file
+        extracted_path = load_archive(archive_name)
+        if not extracted_path:
+            return False
+
+        mobiletouch_dir = None
+        for root, dirs, files in os.walk(extracted_path):
+            if "MobileTouch" in dirs:
+                mobiletouch_dir = Path(root) / "MobileTouch"
+                break
+
+        if not mobiletouch_dir:
+            logger.error(f"MobileTouch directory not found in extracted archive: {archive_name}")
+            return False, {}
+
+        # Look for the log file in the MobileTouch directory
+        log_path = None
+        for root, dirs, files in os.walk(mobiletouch_dir):
+            for file in files:
+                if file.lower() == "mobiletouch.log":
+                    log_path = Path(root) / file
+                    break
+            if log_path:
+                break
+
+        if not log_path:
+            logger.warning(f"No log file found in archive: {archive_name}. Creating an empty one.")
+            # Create an empty log file in the MobileTouch directory
+            log_path = mobiletouch_dir / "logging" / "mobiletouch.log"
+            os.makedirs(log_path.parent, exist_ok=True)
+            with open(log_path, 'w') as f:
+                pass
+
+
+        driver = setup_chrome_driver(user_data_dir=str(mobiletouch_dir), profile_directory="AppData")
+        with driver:
+            result = validate_mobiletouch(driver)
+            assert not result, f"Validation failed before repair for archive {archive_name}"
+
+
+        callbacks_dict = mobile_touch_log_parsing.get_default_callback_dict()
+        function_to_call = callbacks_dict.get(error_type, None)
+        assert function_to_call is not None, f"No callback function found for error type {error_type}"
+
+        # Call the function to repair the archive
+        logger.info(f"Calling repair function for error type {error_type}")
+        try:
+            function_to_call(None, mobiletouch_dir)
+            logger.info(f"Repair function for error type {error_type} completed successfully")
+        except Exception as e:
+            logger.error(f"Error calling repair function for error type {error_type}: {e}")
+            return False
+
+        with setup_chrome_driver(user_data_dir=str(mobiletouch_dir), profile_directory="AppData") as driver:
+            # Validate the MobileTouch application after repair
+            logger.info("Validating MobileTouch application after repair...")
+            result = validate_mobiletouch(driver)
+            assert result, f"Validation failed after repair for archive {archive_name}"
+            return True
+
+    except Exception as e:
+        logger.error(f"Error in _with_archive_repair_from_metadata for archive {archive_name}: {e}")
+        logger.error(f"Stack trace: {traceback.format_exc()}")
+        return False
+
 
 def main():
     """
@@ -695,7 +823,7 @@ def main():
             logger.info("Testing all archives...")
             for archive in archives:
                 logger.info(f"\n\n=== Testing with archive: {archive.name} ===")
-                success = _with_archive_repair_real_logs(archive.name)
+                success = _with_archive_parse_real_logs(archive.name)
                 logger.info(f"Test {'succeeded' if success else 'failed'} for {archive.name}")
         else:
             try:
@@ -704,7 +832,7 @@ def main():
                 if 0 <= index < len(archives):
                     selected_archive = archives[index]
                     logger.info(f"\n\n=== Testing with archive: {selected_archive.name} ===")
-                    success = _with_archive_repair_fake_logs(selected_archive.name)
+                    success = _with_archive_parse_fake_logs(selected_archive.name)
                     logger.info(f"Test {'succeeded' if success else 'failed'} for {selected_archive.name}")
                 else:
                     logger.error(f"Invalid selection. Please enter a number between 1 and {len(archives)}")
