@@ -377,7 +377,7 @@ def handle_failed_reference_tables(entry: LogEntry=None, file_path: Path=None):
     if entry is not None:
         logger.info(f"ACTION: Clearing reference tables due to: {entry.message}")
 
-    mobiletouch_tools.deleteRefTableStore()
+    mobiletouch_tools.deleteRefTableStore(file_path)
 
 
 def handle_failed_device_info(entry: LogEntry, mobiletouch_path: Path):
@@ -397,7 +397,10 @@ def handle_corrupt_schema(entry: LogEntry, file_path: Path):
     Example callback function for CORRUPT_SCHEMA trigger.
     In a real implementation, this would perform a hard clear (deletion of appdata).
     """
-    logger.info(f"ACTION: Performing hard clear (deletion of appdata) due to: {entry.message}")
+    if entry is not None:
+        logger.info(f"ACTION: Performing hard clear (deletion of appdata) due to: {entry.message}")
+    mobiletouch_tools.kill_mobiletouch_process()
+    mobiletouch_tools.hard_clear(file_path)
 
 
 def handle_stores_not_set_up(entry: LogEntry, file_path: Path):
@@ -405,7 +408,10 @@ def handle_stores_not_set_up(entry: LogEntry, file_path: Path):
     Example callback function for STORES_NOT_CORRECTLY_SET_UP trigger.
     In a real implementation, this would perform a hard clear (deletion of appdata).
     """
-    logger.info(f"ACTION: Performing hard clear (deletion of appdata) due to: {entry.message}")
+    if entry is not None:
+        logger.info(f"ACTION: Performing hard clear (deletion of appdata) due to: {entry.message}")
+    mobiletouch_tools.kill_mobiletouch_process()
+    mobiletouch_tools.hard_clear(file_path)
 
 
 default_callbacks = {

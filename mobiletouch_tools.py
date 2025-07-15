@@ -240,8 +240,8 @@ def clear_cookies_and_service_worker(path=standard_path):
         return False
 
 
-def deleteRefTableStore():
-    with setup_chrome_driver() as driver:
+def deleteRefTableStore(mobiletouch_dir="C:\\ProgramData\\Physio-Control\\MobileTouch"):
+    with setup_chrome_driver(mobiletouch_dir) as driver:
         try:
             # Navigate to a URL
             driver.get("https://mobiletouch.healthems.com")
