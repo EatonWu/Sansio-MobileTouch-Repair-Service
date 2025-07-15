@@ -1,6 +1,7 @@
 # MobileTouch Repair Service 
 
 This project provides tools for working with Sansio's MobileTouch application and fixing common issues (database corruptions)
+while preserving user data (EPCR charts and the like)
 
 ## Overview
 
@@ -18,8 +19,8 @@ This script provides tools for fixing common issues with the MobileTouch applica
 
 - Clearing reference tables
 - Deleting device info entries
-- Performing hard resets of the MobileTouch profile
-- Validating MobileTouch configuration
+- Performing hard resets of the MobileTouch profile 
+- Validating that MobileTouch runs correctly
 
 ### mobile_touch_log_parsing.py
 

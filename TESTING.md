@@ -121,17 +121,7 @@ When adding new test archives, update this file to include metadata for the new 
 
 To add a new test archive:
 
-1. Extract the `test_archives.zip` file as described in the [Security Notice](#security-notice) section
-2. Copy the new ZIP file to the extracted `test_archives` directory
-3. Update the `metadata.json` file with information about the new archive
-4. Run the script to test the new archive
-5. Re-encrypt the `test_archives` directory:
-   ```bash
-   # Using 7-Zip (Windows)
-   7z a -tzip -p -mem=AES256 test_archives.zip test_archives/*
-
-   # Using zip (Linux/macOS)
-   zip -e -r test_archives.zip test_archives/
-   ```
-6. When prompted, enter the password (use the same password as before)
-7. After confirming the archive works correctly, remove the unencrypted files from the `test_archives` directory
+1. Zip your MobileTouch directory (usually located at `C:\ProgramData\Phsyio-Control\MobileTouch`). You do not need to re-encrypt or modify any files inside.
+2. Copy the new ZIP file to the extracted `test_archives` directory.
+3. Update the `metadata.json` file in `test_archives` with information about the new archive (filename, error type, produces_alerts, description).
+4. Run the script to test the new archive.

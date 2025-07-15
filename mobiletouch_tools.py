@@ -108,13 +108,14 @@ def custom_remove_item(idb: IndexedDB, object_store_name, key):
     )
 
 
-def setup_chrome_driver():
+def setup_chrome_driver(log_path=r"C:\ProgramData\Physio-Control\MobileTouch\logging\mobiletouch.log"):
     chrome_options = Options()
 
     # headless
     # chrome_options.add_argument("--headless=new")
     chrome_options.binary_location = ".\\chrome-win32\\chrome.exe"
     service = Service(executable_path=".\\chromedriver.exe")
+    service.log_output = log_path
 
     # attempt to open chrome using mobiletouch's profile and data
     chrome_options.add_argument("user-data-dir=C:\\ProgramData\\Physio-Control\\MobileTouch")

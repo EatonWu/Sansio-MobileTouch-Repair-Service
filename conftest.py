@@ -6,7 +6,7 @@ def pytest_configure(config):
     """Configure pytest logging and custom markers."""
     # Configure logging
     logging.basicConfig(
-        level=logging.DEBUG,
+        level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         handlers=[
             logging.StreamHandler(sys.stdout),
