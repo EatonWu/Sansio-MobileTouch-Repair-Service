@@ -393,6 +393,13 @@ def test_archive_repair_from_metadata(setup_temp_dir, archive):
     assert result, f"Failed to repair archive: {archive.name}"
 
 
+@pytest.mark.parametrize("archive", list_available_archives(), ids=lambda x: x.name)
+def test_archive_repair_from_callbacks(setup_temp_dir, archive):
+    logger.info(f"Testing archive repair from callbacks for: {archive.name}")
+    result = _with_archive_repair_from_callbacks(archive.name)
+    assert result, f"Failed to repair archive: {archive.name}"
+
+
 def _with_archive_parse_fake_logs(archive_name):
     """
     Test MobileTouch with a specific archive, including running the mobile_touch_log_parsing loop
@@ -759,7 +766,7 @@ def _with_archive_repair_from_metadata(archive_name):
         driver = setup_chrome_driver(user_data_dir=str(mobiletouch_dir), profile_directory="AppData")
         with driver:
             result = validate_mobiletouch(driver)
-            assert not result, f"Validation failed before repair for archive {archive_name}"
+            assert not result, f"Validation succeeded before repair for archive {archive_name}"
 
 
         callbacks_dict = mobile_touch_log_parsing.get_default_callback_dict()
@@ -785,6 +792,149 @@ def _with_archive_repair_from_metadata(archive_name):
     except Exception as e:
         logger.error(f"Error in _with_archive_repair_from_metadata for archive {archive_name}: {e}")
         logger.error(f"Stack trace: {traceback.format_exc()}")
+        return False
+
+
+def _with_archive_repair_from_callbacks(archive_name):
+    """
+    Executes callbacks by running the mobile_touch_log_parsing loop, and using chromedriver to
+    run mobiletouch, and passes chrome console logs to the MobileTouch log file, hopefully triggering callbacks.
+    These callbacks should then repair the archive. This test succeeds if the archive is repaired.
+
+    :param archive_name:
+    :return:
+    """
+    try:
+        # Get metadata for this archive
+        archive_metadata = get_archive_metadata(archive_name)
+        if archive_metadata:
+            error_type_name = archive_metadata.get('error_type', 'UNKNOWN')
+
+            # Get the TriggerString enum value directly by name
+            try:
+                error_type = getattr(TriggerString, error_type_name)
+            except AttributeError:
+                logger.warning(f"Unknown error type: {error_type_name}, using UNKNOWN")
+                error_type = TriggerString.UNKNOWN
+
+            logger.info(f"Archive {archive_name} has error type {error_type}")
+        else:
+            logger.warning(f"No metadata found for archive {archive_name}, using UNKNOWN error type")
+            error_type = TriggerString.UNKNOWN
+
+        # Extract the archive first to find the log file
+        extracted_path = load_archive(archive_name)
+        if not extracted_path:
+            return False
+
+        # Find the MobileTouch directory in the extracted archive
+        mobiletouch_dir = None
+        for root, dirs, files in os.walk(extracted_path):
+            if "MobileTouch" in dirs:
+                mobiletouch_dir = Path(root) / "MobileTouch"
+                break
+
+        if not mobiletouch_dir:
+            logger.error(f"MobileTouch directory not found in extracted archive: {archive_name}")
+            return False
+
+        # Look for the log file in the MobileTouch directory
+        log_path = None
+        for root, dirs, files in os.walk(mobiletouch_dir):
+            for file in files:
+                if file.lower() == "mobiletouch.log":
+                    log_path = Path(root) / file
+                    break
+            if log_path:
+                break
+
+        if not log_path:
+            logger.warning(f"No log file found in archive: {archive_name}. Creating an empty one.")
+            # Create an empty log file in the MobileTouch directory
+            log_path = mobiletouch_dir / "logging" / "mobiletouch.log"
+            os.makedirs(log_path.parent, exist_ok=True)
+            with open(log_path, 'w') as f:
+                pass
+
+        logger.info(f"Using log file at {log_path}")
+
+        driver = setup_chrome_driver(user_data_dir=str(mobiletouch_dir), profile_directory="AppData")
+        with driver:
+            result = validate_mobiletouch(driver)
+            assert not result, f"Validation succeeded before repair for archive {archive_name}"
+
+
+        setup_trigger_callbacks()
+        # Register our callback for the specific error type, overwriting default one
+
+        # Start the main loop in a separate thread BEFORE loading the archive in Selenium
+        logger.info("Starting mobile_touch_log_parsing main loop...")
+        import threading
+        stop_event = threading.Event()
+
+        def run_main_loop():
+            main_loop(stop_event, log_file=log_path)
+
+        main_thread = threading.Thread(target=run_main_loop)
+        main_thread.start()
+
+        # Set up Chrome driver with the extracted profile
+        logger.info("Setting up Chrome driver...")
+        driver = setup_chrome_driver(user_data_dir=str(mobiletouch_dir), profile_directory="AppData")
+
+        try:
+            # Navigate to MobileTouch URL
+            logger.info("Opening MobileTouch in Chrome")
+            driver.get("https://mobiletouch.healthems.com")
+
+            last_alert_time = time.time()
+            wait_time = 10  # Initial wait time of 15 seconds
+            logs = []
+            while True:
+                try:
+                    alert = WebDriverWait(driver, wait_time).until(EC.alert_is_present())
+                    print(f"Alert found: {alert.text}")
+                    alert.accept()
+                    wait_time = max(1, min(wait_time - 1, 5))  # Decrease wait time, but keep between 1-5 seconds
+                    last_alert_time = time.time()
+                except:
+                    # If no alert found for 5 seconds, break the loop
+                    if time.time() - last_alert_time > 1:
+                        print("No new alerts for 5 seconds, continuing...")
+                        logger.info("Retrieving browser logs...")
+                        logs = driver.get_log("browser")
+                        break
+        finally:
+            # Close the driver
+            driver.quit()
+
+        for log in logs:
+            timestamp = datetime.datetime.fromtimestamp(log['timestamp'] / 1000.0)
+            log_level = log['level']
+            message = log['message']
+            timestamp_str = timestamp.strftime('%Y-%m-%d %H:%M:%S,%f')[:-3]  # Format to match log entry format
+            try:
+                log_entry = LogEntry(timestamp_str, log_level, message)
+                logger.info(f"Log entry created: {log_entry}")
+                with open(log_path, 'a') as log_file:
+                    log_file.write(f"{str(log_entry)}\n")
+                time.sleep(0.5)
+            except Exception as e:
+                logger.error(f"Error creating LogEntry: {e}")
+                continue
+
+        # Allow some time for the main loop to process the logs
+        time.sleep(15)
+
+        stop_event.set()
+        main_thread.join()
+
+        with setup_chrome_driver(user_data_dir=str(mobiletouch_dir), profile_directory="AppData") as driver:
+            result = validate_mobiletouch(driver)
+            assert result, f"Validation failed after repair for archive {archive_name}"
+            return True
+    except Exception as e:
+        logger.error(f"Error in _with_archive_repair_real_logs for archive {archive_name}: {e}")
         return False
 
 
@@ -832,7 +982,7 @@ def main():
                 if 0 <= index < len(archives):
                     selected_archive = archives[index]
                     logger.info(f"\n\n=== Testing with archive: {selected_archive.name} ===")
-                    success = _with_archive_parse_fake_logs(selected_archive.name)
+                    success = _with_archive_repair_from_callbacks(selected_archive.name)
                     logger.info(f"Test {'succeeded' if success else 'failed'} for {selected_archive.name}")
                 else:
                     logger.error(f"Invalid selection. Please enter a number between 1 and {len(archives)}")

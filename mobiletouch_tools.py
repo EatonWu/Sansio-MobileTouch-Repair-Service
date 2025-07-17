@@ -340,6 +340,7 @@ def validate_mobiletouch(driver=None):
     kill_mobiletouch_process()
 
     print("Validating MobileTouch...")
+    driver_provided = driver is not None
 
     # create selenium driver
     if driver is None:
@@ -362,7 +363,10 @@ def validate_mobiletouch(driver=None):
         print(f"Could not validate MobileTouch: {e}")
         return False
     finally:
-        driver.quit()
+        if not driver_provided:
+            # Quit the driver if it was created in this function
+            print("Quitting the driver.")
+            driver.quit()
 
 
 def main():

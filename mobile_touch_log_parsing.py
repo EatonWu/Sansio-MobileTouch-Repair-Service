@@ -245,10 +245,11 @@ def check_last_modified(log_file: Path = standard_log_path):
     return last_modified_date
 
 
-def check_trigger_strings(entry: LogEntry):
+def check_trigger_strings(entry: LogEntry, mobiletouch_path: Path = standard_log_path):
     """
     Checks a log entry against all defined trigger strings.
     If a trigger string is found and has a callback registered, the callback is called.
+    :param mobiletouch_path: path to mobiletouch directory, used for callbacks
     :param entry: LogEntry to check
     :return: True if a trigger string was found, False otherwise
     """
@@ -256,7 +257,7 @@ def check_trigger_strings(entry: LogEntry):
         if trigger.value in entry.message:
             logger.info(f"Detected trigger string {trigger.name}: {entry}")
             if trigger.callback:
-                trigger.callback(entry)
+                trigger.callback(entry, mobiletouch_path)
             return True
     return False
 
@@ -308,6 +309,8 @@ def main_loop(stop_event: Event = None, logs_loaded_event: Event = None,log_file
         logger.error(f"Log file does not exist: {log_file}.")
         return
 
+    mobiletouch_dir_path = log_file.parent.parent
+
     while stop_event is None or not stop_event.is_set():
         try:
             temp_last_modified = check_last_modified(log_file)
@@ -352,7 +355,7 @@ def main_loop(stop_event: Event = None, logs_loaded_event: Event = None,log_file
                         last_seen_log_entry = new_entries[0]  # Update to most recent entry
                         for entry in new_entries:
                             logger.info(str(entry))
-                            check_trigger_strings(entry)
+                            check_trigger_strings(entry, mobiletouch_dir_path)
                     else:
                         logger.warning("No new entries found since last check despite file modification?")
             else:
