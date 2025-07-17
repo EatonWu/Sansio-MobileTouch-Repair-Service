@@ -944,7 +944,6 @@ def main():
     Allows the user to select a specific archive to test or run all archives.
     """
     try:
-
         clean_temp_directories()
         # Create temp directory if it doesn't exist
         os.makedirs(TEMP_DIR, exist_ok=True)

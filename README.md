@@ -30,6 +30,10 @@ This script parses MobileTouch log files and can detect and respond to various e
 - Automatically triggers appropriate fixes based on detected errors
 - Supports different error types with customizable responses
 
+### test_archives.py
+
+test_archives.py contains automated tests that utilize the sample MobileTouch log archives found in the test_archives/ directory. These tests help ensure that the log parsing and repair tools work correctly with real-world data. You can run this script to validate changes to the log parsing or repair logic against a variety of known MobileTouch error scenarios.
+
 ## Testing
 
 For information about testing with MobileTouch test archives, please see the [TESTING.md](TESTING.md) file.
