@@ -9,17 +9,19 @@ from typing import Callable, List
 from threading import Event
 
 import mobiletouch_tools
+from mobiletouch_tools import kill_mobiletouch_process
 
-# Configure logging
-# This logging configuration replaces direct prints to stderr with a more flexible logging system.
-# Benefits:
-# 1. Different log levels (DEBUG, INFO, WARNING, ERROR, CRITICAL) for different types of messages
-# 2. Consistent formatting of log messages
-# 3. Easy redirection of logs to a file instead of stdout/stderr
-# 4. Control over log verbosity through the level setting
-#
-# To log to a file instead of stdout, uncomment the FileHandler line below.
-# To change the log level, modify the level parameter (e.g., logging.DEBUG for more verbose logging).
+# Import win11toast for notifications
+try:
+    from win11toast import notify
+    NOTIFICATIONS_AVAILABLE = True
+except ImportError:
+    NOTIFICATIONS_AVAILABLE = False
+    logging.warning("win11toast not available. Notifications will be disabled.")
+
+# Global variable to track the last notification time
+_last_notification_time = datetime.datetime.min
+
 logging.basicConfig(
     level=logging.DEBUG,  # Set to logging.DEBUG for more verbose output
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -77,7 +79,7 @@ class TriggerString(enum.Enum):
     def callback(self, func: Callable[['LogEntry', Path], None]):
         """
         Set a callback function to be called when this trigger string is detected.
-    
+
         Args:
             func: A function that takes a LogEntry and Path as arguments and returns None.
         """
@@ -245,10 +247,66 @@ def check_last_modified(log_file: Path = standard_log_path):
     return last_modified_date
 
 
+def notification_callback():
+    """
+    Callback function for when the user clicks on the notification.
+    This will trigger the repair process immediately.
+    """
+    logger.info("User clicked on notification. Triggering repair process.")
+    # We don't need to do anything specific here as the repair process
+    # is already triggered automatically when an error is detected.
+    # This is just to acknowledge the user's action.
+
+
+def send_notification(title, message, trigger_type=None):
+    """
+    Send a notification using win11toast, but only if enough time has passed since the last notification.
+
+    Args:
+        title (str): The notification title
+        message (str): The notification message
+        trigger_type (TriggerString, optional): The type of trigger that caused the notification
+
+    Returns:
+        bool: True if notification was sent, False otherwise
+    """
+    global _last_notification_time
+
+    # Check if notifications are available
+    if not NOTIFICATIONS_AVAILABLE:
+        logger.warning("Notifications are not available. Skipping notification.")
+        return False
+
+    # Check if enough time has passed since the last notification (5 minutes = 300 seconds)
+    current_time = datetime.datetime.now()
+    time_since_last = (current_time - _last_notification_time).total_seconds()
+
+    if time_since_last < 300:  # 5 minutes in seconds
+        logger.info(f"Skipping notification: last one was {time_since_last:.1f} seconds ago (< 300 seconds)")
+        return False
+
+    # Send notification with callback
+    try:
+        notify(
+            title=title, 
+            body=message,
+            on_click=notification_callback,
+            app_id="SansioMobileTouchRepairService",
+        )
+        _last_notification_time = current_time
+        logger.info(f"Notification sent: {title} - {message}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to send notification: {e}")
+        return False
+
+
 def check_trigger_strings(entry: LogEntry, mobiletouch_path: Path = standard_log_path):
     """
     Checks a log entry against all defined trigger strings.
     If a trigger string is found and has a callback registered, the callback is called.
+    Also sends a notification to the user about the detected error.
+
     :param mobiletouch_path: path to mobiletouch directory, used for callbacks
     :param entry: LogEntry to check
     :return: True if a trigger string was found, False otherwise
@@ -256,6 +314,14 @@ def check_trigger_strings(entry: LogEntry, mobiletouch_path: Path = standard_log
     for trigger in TriggerString:
         if trigger.value in entry.message:
             logger.info(f"Detected trigger string {trigger.name}: {entry}")
+
+            # Send notification about the detected error
+            send_notification(
+                title="MobileTouch Error Detected",
+                message=f"A {trigger.name} error was detected. The repair service will attempt to fix it.",
+                trigger_type=trigger
+            )
+
             if trigger.callback:
                 trigger.callback(entry, mobiletouch_path)
             return True
@@ -350,7 +416,7 @@ def main_loop(stop_event: Event = None, logs_loaded_event: Event = None,log_file
                         continue
                     logger.info(f"Log file modified at {last_modified}. Old: {last_seen_log_entry.timestamp} Parsing new entries...")
                     # Check for entries newer than last_seen_log_entry
-                    new_entries = [entry for entry in entries if entry.timestamp > last_seen_log_entry.timestamp]
+                    new_entries = [entry for entry in entries if entry.timestamp >= last_seen_log_entry.timestamp]
                     if new_entries:
                         last_seen_log_entry = new_entries[0]  # Update to most recent entry
                         for entry in new_entries:
@@ -380,7 +446,15 @@ def handle_failed_reference_tables(entry: LogEntry=None, file_path: Path=None):
     if entry is not None:
         logger.info(f"ACTION: Clearing reference tables due to: {entry.message}")
 
+    kill_mobiletouch_process()
     mobiletouch_tools.deleteRefTableStore(file_path)
+
+    # Start MobileTouch after repair
+    logger.info("Starting MobileTouch application after repair...")
+    if mobiletouch_tools.start_mobiletouch():
+        logger.info("MobileTouch application started successfully.")
+    else:
+        logger.warning("Failed to start MobileTouch application.")
 
 
 def handle_failed_device_info(entry: LogEntry, mobiletouch_path: Path):
@@ -394,6 +468,13 @@ def handle_failed_device_info(entry: LogEntry, mobiletouch_path: Path):
     mobiletouch_tools.delete_deviceinfo_entry(mobiletouch_path)
     mobiletouch_tools.clear_cookies_and_service_worker(mobiletouch_path)
 
+    # Start MobileTouch after repair
+    logger.info("Starting MobileTouch application after repair...")
+    if mobiletouch_tools.start_mobiletouch():
+        logger.info("MobileTouch application started successfully.")
+    else:
+        logger.warning("Failed to start MobileTouch application.")
+
 
 def handle_corrupt_schema(entry: LogEntry, file_path: Path):
     """
@@ -405,6 +486,13 @@ def handle_corrupt_schema(entry: LogEntry, file_path: Path):
     mobiletouch_tools.kill_mobiletouch_process()
     mobiletouch_tools.hard_clear(file_path)
 
+    # Start MobileTouch after repair
+    logger.info("Starting MobileTouch application after repair...")
+    if mobiletouch_tools.start_mobiletouch():
+        logger.info("MobileTouch application started successfully.")
+    else:
+        logger.warning("Failed to start MobileTouch application.")
+
 
 def handle_stores_not_set_up(entry: LogEntry, file_path: Path):
     """
@@ -415,6 +503,13 @@ def handle_stores_not_set_up(entry: LogEntry, file_path: Path):
         logger.info(f"ACTION: Performing hard clear (deletion of appdata) due to: {entry.message}")
     mobiletouch_tools.kill_mobiletouch_process()
     mobiletouch_tools.hard_clear(file_path)
+
+    # Start MobileTouch after repair
+    logger.info("Starting MobileTouch application after repair...")
+    if mobiletouch_tools.start_mobiletouch():
+        logger.info("MobileTouch application started successfully.")
+    else:
+        logger.warning("Failed to start MobileTouch application.")
 
 
 default_callbacks = {
@@ -432,7 +527,7 @@ def setup_trigger_callbacks():
     Set up callback functions for all trigger strings.
     """
     register_trigger_callbacks(default_callbacks)
-    
+
 
 def setup_test_callbacks():
     """

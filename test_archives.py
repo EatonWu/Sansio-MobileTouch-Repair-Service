@@ -8,17 +8,12 @@ import pytest
 import time
 import json
 import datetime
-import random
 from pathlib import Path
 import logging
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.wait import WebDriverWait
 
 import mobile_touch_log_parsing
-import mobiletouch_tools
 from mobile_touch_log_parsing import main_loop, setup_trigger_callbacks, TriggerString, register_trigger_callback, \
     LogEntry, setup_test_callbacks
 from mobiletouch_tools import validate_mobiletouch, setup_chrome_driver
@@ -277,6 +272,7 @@ def test_archives_exist():
     archives = list_available_archives()
     assert len(archives) > 0, "No test archives found"
 
+
 @pytest.mark.parametrize("archive", list_available_archives(), ids=lambda x: x.name)
 def test_archive_loading(setup_temp_dir, archive):
     """Test loading each available archive."""
@@ -284,34 +280,6 @@ def test_archive_loading(setup_temp_dir, archive):
     result = _with_archive(archive.name)
     assert result, f"Failed to load archive: {archive.name}"
 
-@pytest.mark.parametrize("archive", list_available_archives(), ids=lambda x: x.name)
-def test_archive_parsing_fake_logs(setup_temp_dir, archive):
-    """
-    Test that archives can be loaded and that the mobile_touch_log_parsing loop
-    correctly identifies and repairs issues by triggering the appropriate callbacks.
-
-    This test uses fake logs injected into the log file to trigger callbacks.
-    This is to differentiate issues with the MobileTouch application itself
-    not generating appropriate logs/error messages.
-
-    This test verifies that:
-    1. The archive can be loaded successfully
-    2. The main_loop function correctly processes log entries
-    3. Callbacks are triggered only on subsequent log modifications, not on initial load
-    """
-    logger.info(f"Testing archive repair with fake logs for: {archive.name}")
-    result, triggered_callbacks = _with_archive_parse_fake_logs(archive.name)
-    assert result, f"Failed to load archive: {archive.name}"
-
-    # The assertion for callbacks being triggered is now handled in _with_archive_repair_fake_logs
-    # This ensures that the test fails if no callbacks are triggered
-
-    # Log which callbacks were triggered
-    for trigger, count in triggered_callbacks.items():
-        if count > 0:
-            logger.info(f"Callback for {trigger.name} was triggered {count} times")
-
-    logger.info(f"Test completed successfully for archive: {archive.name}")
 
 def test_epcr059_fake_logs():
     """
@@ -358,6 +326,36 @@ def test_epcr059_repair_metadata():
     logger.info(f"Testing specific archive repair from metadata: {archive_name}")
     result = _with_archive_repair_from_metadata(archive_name)
     assert result, f"Repair from metadata failed for archive: {archive_name}"
+
+@pytest.mark.parametrize("archive", list_available_archives(), ids=lambda x: x.name)
+def test_archive_parsing_fake_logs(setup_temp_dir, archive):
+    """
+    Test that archives can be loaded and that the mobile_touch_log_parsing loop
+    correctly identifies and repairs issues by triggering the appropriate callbacks.
+
+    This test uses fake logs injected into the log file to trigger callbacks.
+    This is to differentiate issues with the MobileTouch application itself
+    not generating appropriate logs/error messages.
+
+    This test verifies that:
+    1. The archive can be loaded successfully
+    2. The main_loop function correctly processes log entries
+    3. Callbacks are triggered only on subsequent log modifications, not on initial load
+    """
+    logger.info(f"Testing archive repair with fake logs for: {archive.name}")
+    result, triggered_callbacks = _with_archive_parse_fake_logs(archive.name)
+    assert result, f"Failed to load archive: {archive.name}"
+
+    # The assertion for callbacks being triggered is now handled in _with_archive_repair_fake_logs
+    # This ensures that the test fails if no callbacks are triggered
+
+    # Log which callbacks were triggered
+    for trigger, count in triggered_callbacks.items():
+        if count > 0:
+            logger.info(f"Callback for {trigger.name} was triggered {count} times")
+
+    logger.info(f"Test completed successfully for archive: {archive.name}")
+
 
 @pytest.mark.parametrize("archive", list_available_archives(), ids=lambda x: x.name)
 def test_archive_parsing_real_logs(setup_temp_dir, archive):
@@ -475,7 +473,7 @@ def _with_archive_parse_fake_logs(archive_name):
         # Set up test trigger callbacks that will update the triggered_callbacks dictionary
         logger.info("Setting up test trigger callbacks...")
 
-        def temp_callback(entry):
+        def temp_callback(entry, file_path):
             """
             Temporary callback function to update triggered_callbacks.
             This will be called when the trigger string is detected in a log entry.
@@ -520,7 +518,7 @@ def _with_archive_parse_fake_logs(archive_name):
             logger.info(f"Injected fake log entry: {fake_log_entry.strip()}")
 
         # Allow some time for the main loop to process the injected log
-        time.sleep(5)
+        time.sleep(10)
         stop_event.set()
 
         # Wait for the main loop to complete
@@ -610,7 +608,7 @@ def _with_archive_parse_real_logs(archive_name):
         # Initialize the triggered_callbacks dictionary
         triggered_callbacks = {trigger: 0 for trigger in TriggerString}
 
-        def temp_callback(entry):
+        def temp_callback(entry, file_path):
             """
             Temporary callback function to update triggered_callbacks.
             This will be called when the trigger string is detected in a log entry.
@@ -679,7 +677,7 @@ def _with_archive_parse_real_logs(archive_name):
                 continue
 
         # Allow some time for the main loop to process the logs
-        time.sleep(10)
+        time.sleep(5)
 
         stop_event.set()
         main_thread.join()

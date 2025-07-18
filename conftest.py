@@ -1,7 +1,9 @@
 import logging
 import sys
+import pytest
 
 # Configure pytest
+@pytest.hookimpl
 def pytest_configure(config):
     """Configure pytest logging and custom markers."""
     # Configure logging
@@ -17,6 +19,7 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "archive: mark test to run only on specific archives")
 
 # Add command line options
+@pytest.hookimpl
 def pytest_addoption(parser):
     """Add command line options to pytest."""
     parser.addoption(
@@ -24,6 +27,7 @@ def pytest_addoption(parser):
     )
 
 # Filter tests based on command line options
+@pytest.hookimpl
 def pytest_collection_modifyitems(config, items):
     """Filter tests based on command line options."""
     archive_name = config.getoption("--archive")

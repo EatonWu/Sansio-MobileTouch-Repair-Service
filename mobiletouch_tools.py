@@ -1,8 +1,14 @@
+import logging
 import os
 import sys
 import time
 import psutil
+import subprocess
+import winreg
 from shutil import rmtree
+
+# Global variable to store the MobileTouch executable path
+_mobiletouch_executable_path = None
 
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -19,36 +25,36 @@ def clear_object_store(idb: IndexedDB, object_store_name):
         """
             console.log("Clearing object store: " + arguments[2]);
             var [ dbName, dbVersion, objectStoreName] = [ arguments[0], arguments[1], arguments[2]];
-            
+
             // Create indicator element
             var indicator = document.createElement('div');
             indicator.id = 'clear-complete-indicator';
             indicator.style.display = 'none';
             document.body.appendChild(indicator);
-            
+
             var request = window.indexedDB.open(dbName, dbVersion);
-            
+
             request.onerror = function(event) {
                 console.error("Error opening IndexedDB: " + dbName, event);
             }
-            
+
             request.onsuccess = function(event) {
                 var db = event.target.result;
                 var objectStore = db.transaction(objectStoreName, 'readwrite').objectStore(objectStoreName);
-                
+
                 const objectStoreRequest = objectStore.clear();
-                
+
                 objectStoreRequest.onerror = function(event) {
                     console.error("Error clearing object store: " + objectStoreName, event);
                 }
-            
+
                 objectStoreRequest.onsuccess = function(event) {
                     console.log("Object store cleared: " + objectStoreName);
                     db.commit;
                     // Set indicator when complete
                     indicator.setAttribute('data-complete', 'true');
                 };
-                
+
             };
         """,
         idb.db_name,
@@ -69,36 +75,36 @@ def custom_remove_item(idb: IndexedDB, object_store_name, key):
         """
             console.log("Removing item from object store: " + arguments[2] + " with key: " + arguments[3]);
             var [ dbName, dbVersion, objectStoreName, key] = [ arguments[0], arguments[1], arguments[2], arguments[3]];
-            
+
             // Create indicator element
             var indicator = document.createElement('div');
             indicator.id = 'clear-complete-indicator';
             indicator.style.display = 'none';
             document.body.appendChild(indicator);
-            
+
             var request = window.indexedDB.open(dbName, dbVersion);
-            
+
             request.onerror = function(event) {
                 console.error("Error opening IndexedDB: " + dbName, event);
             }
-            
+
             request.onsuccess = function(event) {
                 var db = event.target.result;
                 var objectStore = db.transaction(objectStoreName, 'readwrite').objectStore(objectStoreName);
-                
+
                 const objectStoreRequest = objectStore.delete(key);
-                
+
                 objectStoreRequest.onerror = function(event) {
                     console.error("Error removing item from object store: " + objectStoreName, event);
                 }
-            
+
                 objectStoreRequest.onsuccess = function(event) {
                     console.log("Item removed from object store: " + objectStoreName + " with key: " + key);
                     db.commit;
                     // Set indicator when complete
                     indicator.setAttribute('data-complete', 'true');
                 };
-                
+
             };
         """,
         idb.db_name,
@@ -121,10 +127,17 @@ def setup_chrome_driver(user_data_dir=None, profile_directory=None):
         webdriver.Chrome: Configured Chrome WebDriver instance
     """
     chrome_options = Options()
+    chrome_options.add_argument("--headless=new")
+
+    logging.info("Current working directory: %s", os.getcwd())
 
     # Set the Chrome binary location
-    chrome_options.binary_location = ".\\chrome-win32\\chrome.exe"
-    service = Service(executable_path=".\\chromedriver.exe")
+
+    path_to_chrome = os.path.abspath(os.path.join(os.path.dirname(__file__), 'chrome-win32', 'chrome.exe'))
+    path_to_chrome_driver = os.path.abspath(os.path.join(os.path.dirname(__file__), 'chromedriver.exe'))
+
+    chrome_options.binary_location = path_to_chrome
+    service = Service(executable_path=path_to_chrome_driver)
 
     # Set the user data directory and profile
     if user_data_dir:
@@ -144,26 +157,47 @@ def setup_chrome_driver(user_data_dir=None, profile_directory=None):
 
 
 
-def hard_clear(path=standard_path):
+def hard_clear(path=standard_path, max_retries=3, retry_delay=1):
     """
     Last resort; deletes the MobileTouch profile directory.
+    Includes a retry mechanism with exponential backoff.
+
+    :param path: Path to the MobileTouch directory
+    :param max_retries: Maximum number of retry attempts
+    :param retry_delay: Initial delay between retries in seconds
     :return: true if successful, false otherwise
     """
     path = os.path.join(path, "AppData")
-    try:
-        if os.path.exists(path):
-            rmtree(path)
-            print(f"Removed directory and contents: {path}")
-            return True
-        else:
-            print(f"Directory does not exist: {path}")
-            return False
-    except PermissionError as e:
-        print(f"Permission error while removing directory: {e}", file=sys.stderr)
-        return False
-    except Exception as e:
-        print(f"An error occurred while clearing the directory: {e}", file=sys.stderr)
-        return False
+
+    for attempt in range(max_retries + 1):
+        try:
+            if os.path.exists(path):
+                if attempt > 0:
+                    print(f"Retry attempt {attempt}/{max_retries} to remove directory: {path}")
+                rmtree(path)
+                print(f"Removed directory and contents: {path}")
+                return True
+            else:
+                print(f"Directory does not exist: {path}")
+                return False
+        except PermissionError as e:
+            if attempt < max_retries:
+                current_delay = retry_delay * (2 ** attempt)  # Exponential backoff
+                print(f"Permission error while removing directory: {e}. Retrying in {current_delay} seconds...", file=sys.stderr)
+                time.sleep(current_delay)
+            else:
+                print(f"Permission error while removing directory after {max_retries} retries: {e}", file=sys.stderr)
+                return False
+        except Exception as e:
+            if attempt < max_retries:
+                current_delay = retry_delay * (2 ** attempt)  # Exponential backoff
+                print(f"Error while clearing directory: {e}. Retrying in {current_delay} seconds...", file=sys.stderr)
+                time.sleep(current_delay)
+            else:
+                print(f"An error occurred while clearing the directory after {max_retries} retries: {e}", file=sys.stderr)
+                return False
+
+    return False
 
 
 
@@ -316,12 +350,25 @@ def seek_mobiletouch_process():
 def kill_mobiletouch_process():
     """
     Kills the MobileTouch process if it is running.
+    Saves the executable path before terminating the process.
     """
+    global _mobiletouch_executable_path
+
     print("Attempting to kill MobileTouch process...")
     pid = seek_mobiletouch_process()
     if pid:
         try:
             proc = psutil.Process(pid)
+
+            # Save the executable path before terminating the process
+            try:
+                exe_path = proc.exe()
+                if exe_path and os.path.exists(exe_path):
+                    print(f"Saved MobileTouch executable path: {exe_path}")
+                    _mobiletouch_executable_path = exe_path
+            except (psutil.AccessDenied, psutil.ZombieProcess) as e:
+                print(f"Could not get executable path: {e}")
+
             proc.terminate()  # or proc.kill() for a forceful termination
             print(f"MobileTouch process (PID: {pid}) terminated successfully.")
         except psutil.NoSuchProcess:
@@ -367,6 +414,118 @@ def validate_mobiletouch(driver=None):
             # Quit the driver if it was created in this function
             print("Quitting the driver.")
             driver.quit()
+
+
+def find_mobiletouch_executable():
+    """
+    Finds the MobileTouch executable path by:
+    1. Using the saved path from a previously killed process
+    2. Checking common installation locations
+    3. Checking the Windows registry
+    4. Getting the path from process information if it is currently running
+
+    Returns:
+        str: Path to the MobileTouch executable if found, None otherwise
+    """
+    global _mobiletouch_executable_path
+
+    # First check if we have a saved path from a previously killed process
+    if _mobiletouch_executable_path and os.path.exists(_mobiletouch_executable_path):
+        print(f"Using saved MobileTouch executable path: {_mobiletouch_executable_path}")
+        return _mobiletouch_executable_path
+
+    # Common installation locations
+    common_locations = [
+        r"C:\Program Files (x86)\Sansio Inc\MobileTouch\MobileTouch.exe",
+        r"C:\Program Files\Sansio Inc\MobileTouch\MobileTouch.exe",
+        r"C:\Program Files (x86)\Physio-Control\MobileTouch\MobileTouch.exe",
+        r"C:\Program Files\Physio-Control\MobileTouch\MobileTouch.exe"
+    ]
+
+    # Check common locations
+    for location in common_locations:
+        if os.path.exists(location):
+            print(f"Found MobileTouch executable at common location: {location}")
+            return location
+
+    # Check Windows registry
+    try:
+        # Try different registry paths that might contain MobileTouch installation info
+        registry_paths = [
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Sansio Inc\MobileTouch"),
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Physio-Control\MobileTouch"),
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Sansio Inc\MobileTouch"),
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Physio-Control\MobileTouch")
+        ]
+
+        for hkey, path in registry_paths:
+            try:
+                with winreg.OpenKey(hkey, path) as key:
+                    install_path, _ = winreg.QueryValueEx(key, "InstallPath")
+                    exe_path = os.path.join(install_path, "MobileTouch.exe")
+                    if os.path.exists(exe_path):
+                        print(f"Found MobileTouch executable in registry: {exe_path}")
+                        return exe_path
+            except FileNotFoundError:
+                continue
+            except Exception as e:
+                print(f"Error checking registry path {path}: {e}")
+                continue
+    except Exception as e:
+        print(f"Error checking registry: {e}")
+
+    # Try to get the path from process information
+    print("Checking for running MobileTouch process...")
+    for proc in psutil.process_iter(['pid', 'name', 'exe']):
+        try:
+            if "MobileTouch" in proc.info['name']:
+                exe_path = proc.info['exe']
+                if exe_path and os.path.exists(exe_path):
+                    print(f"Found MobileTouch executable from process: {exe_path}")
+                    return exe_path
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+
+    print("Could not find MobileTouch executable.")
+    return None
+
+
+def start_mobiletouch(wait_for_startup=False):
+    """
+    Starts the MobileTouch application.
+
+    Args:
+        wait_for_startup (bool): Whether to wait for the application to start up
+
+    Returns:
+        bool: True if the application was started successfully, False otherwise
+    """
+    exe_path = find_mobiletouch_executable()
+    if not exe_path:
+        print("Could not find MobileTouch executable. Unable to start application.")
+        return False
+
+    try:
+        print(f"Starting MobileTouch from: {exe_path}")
+        process = subprocess.Popen([exe_path])
+
+        if wait_for_startup:
+            # Wait for a short time to allow the process to start
+            time.sleep(5)
+
+            # Check if the process is still running
+            if process.poll() is None:
+                print("MobileTouch started successfully.")
+                return True
+            else:
+                print(f"MobileTouch process exited with code: {process.returncode}")
+                return False
+
+        print("MobileTouch start initiated.")
+        return True
+    except Exception as e:
+        print(f"Error starting MobileTouch: {e}")
+        return False
 
 
 def main():
