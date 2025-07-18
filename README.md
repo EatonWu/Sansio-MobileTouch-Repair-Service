@@ -1,6 +1,18 @@
 # MobileTouch Repair Application
 
-This application is designed to repair Mobile Touch issues for Community Ambulance. It runs as a windowless application that can be started manually or set to run at Windows startup.
+## Testing Suite
+
+This project includes a comprehensive testing suite to ensure reliability and correctness of the MobileTouch Repair Application. The tests are written in Python and use the `pytest` framework. Key points about the testing suite:
+
+- **Test Files:** Test scripts are located in files such as `test_logging.py`, `test_archives.py`, and others in the project root.
+- **How to Run Tests:**
+  1. Ensure all dependencies are installed (see `requirements.txt`).
+  2. Run tests using the command:
+     ```
+     pytest
+     ```
+- **Test Data:** The `test_archives/` directory contains sample data and archives used by the tests.
+- **Testing Documentation:** See `TESTING.md` for more details on test coverage and guidelines.
 
 ## Logging
 
@@ -107,25 +119,3 @@ If logs are not being written:
    icacls "C:\Logs" /grant "$currentUser:(OI)(CI)F"
    icacls "C:\ProgramData\MobileTouchRepairService" /grant "$currentUser:(OI)(CI)F"
    ```
-
-5. Try running the application with administrator privileges by right-clicking the executable and selecting "Run as administrator"
-
-## Recent Changes
-
-The logging system has been enhanced with the following improvements:
-
-1. Added a debug log file to help diagnose issues with the main log file
-2. Added extensive error handling and logging throughout the setup process
-3. Added direct file writing tests to verify permissions
-4. Added fallback to a simple FileHandler if RotatingFileHandler fails
-5. Enhanced the flush_logger function with better error handling
-6. Added a test log entry during initialization to verify the logger is working
-7. Added multiple log file locations with automatic detection of writable locations
-8. Added a log path file to help locate where logs are being written
-9. Implemented periodic log file rotation to ensure logs are written to disk
-10. Added an atexit shutdown hook to ensure logs are flushed when the process terminates
-11. Improved the service stop method to properly close all handlers
-12. Added os.fsync calls to force the OS to write logs to disk
-13. Added comprehensive error handling throughout the logging system
-
-These changes should help ensure that logs are written properly when running as a Windows service, even in environments with restricted permissions or unusual configurations.
