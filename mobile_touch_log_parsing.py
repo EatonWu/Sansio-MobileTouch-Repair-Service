@@ -21,6 +21,7 @@ except ImportError:
 
 # Global variable to track the last notification time
 _last_notification_time = datetime.datetime.min
+_last_callback_time = datetime.datetime.min
 
 logging.basicConfig(
     level=logging.DEBUG,  # Set to logging.DEBUG for more verbose output
@@ -62,6 +63,8 @@ class TriggerString(enum.Enum):
     # response should be to do a hard clear (deletion of appdata)
     # this usually points to database corruption
     STORES_NOT_CORRECTLY_SET_UP = "Stores not correctly set up, db"
+
+    DEVICE_ID_MISMATCH = "Error: Device configuration corrupt - device ID mismatch (3)"
 
     UNKNOWN = "UNKNOWN"
 
@@ -281,8 +284,8 @@ def send_notification(title, message, trigger_type=None):
     current_time = datetime.datetime.now()
     time_since_last = (current_time - _last_notification_time).total_seconds()
 
-    if time_since_last < 300:  # 5 minutes in seconds
-        logger.info(f"Skipping notification: last one was {time_since_last:.1f} seconds ago (< 300 seconds)")
+    if time_since_last < 30:  # seconds
+        logger.info(f"Skipping notification: last one was {time_since_last:.1f} seconds ago (< 30 seconds)")
         return False
 
     # Send notification with callback
@@ -290,7 +293,6 @@ def send_notification(title, message, trigger_type=None):
         notify(
             title=title, 
             body=message,
-            on_click=notification_callback,
             app_id="SansioMobileTouchRepairService",
         )
         _last_notification_time = current_time
@@ -311,18 +313,28 @@ def check_trigger_strings(entry: LogEntry, mobiletouch_path: Path = standard_log
     :param entry: LogEntry to check
     :return: True if a trigger string was found, False otherwise
     """
+
+    global _last_callback_time
+
     for trigger in TriggerString:
         if trigger.value in entry.message:
+
             logger.info(f"Detected trigger string {trigger.name}: {entry}")
 
-            # Send notification about the detected error
-            send_notification(
-                title="MobileTouch Error Detected",
-                message=f"A {trigger.name} error was detected. The repair service will attempt to fix it.",
-                trigger_type=trigger
-            )
-
             if trigger.callback:
+
+                # Check if enough time has passed since the last callback
+                if (datetime.datetime.now() - _last_callback_time).total_seconds() < 15:
+                    logger.info(f"Skipping callback for {trigger.name}: last callback was less than 15 seconds ago.")
+                    break
+
+                # Send notification about the detected error
+                send_notification(
+                    title="MobileTouch Error Detected",
+                    message=f"A {trigger.name} error was detected. The repair service will attempt to fix it.",
+                    trigger_type=trigger
+                )
+                _last_callback_time = datetime.datetime.now()
                 trigger.callback(entry, mobiletouch_path)
             return True
     return False
@@ -439,10 +451,6 @@ def main_loop(stop_event: Event = None, logs_loaded_event: Event = None,log_file
 
 
 def handle_failed_reference_tables(entry: LogEntry=None, file_path: Path=None):
-    """
-    Example callback function for FAILED_GET_REFERENCE_TABLES trigger.
-    In a real implementation, this would clear reference tables.
-    """
     if entry is not None:
         logger.info(f"ACTION: Clearing reference tables due to: {entry.message}")
 
@@ -458,10 +466,6 @@ def handle_failed_reference_tables(entry: LogEntry=None, file_path: Path=None):
 
 
 def handle_failed_device_info(entry: LogEntry, mobiletouch_path: Path):
-    """
-    Example callback function for FAILED_GET_DEVICE_INFO trigger.
-    In a real implementation, this would clear device info, cookies, and service worker.
-    """
     if entry is not None:
         logger.info(f"ACTION: Clearing device info, cookies, and service worker due to: {entry.message}")
     mobiletouch_tools.kill_mobiletouch_process()
@@ -477,10 +481,6 @@ def handle_failed_device_info(entry: LogEntry, mobiletouch_path: Path):
 
 
 def handle_corrupt_schema(entry: LogEntry, file_path: Path):
-    """
-    Example callback function for CORRUPT_SCHEMA trigger.
-    In a real implementation, this would perform a hard clear (deletion of appdata).
-    """
     if entry is not None:
         logger.info(f"ACTION: Performing hard clear (deletion of appdata) due to: {entry.message}")
     mobiletouch_tools.kill_mobiletouch_process()
@@ -495,10 +495,6 @@ def handle_corrupt_schema(entry: LogEntry, file_path: Path):
 
 
 def handle_stores_not_set_up(entry: LogEntry, file_path: Path):
-    """
-    Example callback function for STORES_NOT_CORRECTLY_SET_UP trigger.
-    In a real implementation, this would perform a hard clear (deletion of appdata).
-    """
     if entry is not None:
         logger.info(f"ACTION: Performing hard clear (deletion of appdata) due to: {entry.message}")
     mobiletouch_tools.kill_mobiletouch_process()
@@ -516,7 +512,8 @@ default_callbacks = {
     TriggerString.FAILED_GET_REFERENCE_TABLES: handle_failed_reference_tables,
     TriggerString.FAILED_GET_DEVICE_INFO: handle_failed_device_info,
     TriggerString.CORRUPT_SCHEMA: handle_corrupt_schema,
-    TriggerString.STORES_NOT_CORRECTLY_SET_UP: handle_stores_not_set_up
+    TriggerString.STORES_NOT_CORRECTLY_SET_UP: handle_stores_not_set_up,
+    TriggerString.DEVICE_ID_MISMATCH: handle_failed_device_info
 }
 
 def get_default_callback_dict():

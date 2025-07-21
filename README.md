@@ -17,11 +17,7 @@ This project includes a comprehensive testing suite to ensure reliability and co
 ## Logging
 
 The application logs information to the following files:
-- Main log file: Located in one of these directories (in order of preference):
-  - `C:\Users\<Username>\AppData\Local\Temp\mt-repair-service\mt-repair-service.log`
-  - `C:\Logs\mt-repair-service\mt-repair-service.log`
-  - `C:\Windows\Temp\mt-repair-service\mt-repair-service.log`
-  - `C:\ProgramData\MobileTouchRepairService\mt-repair-service\mt-repair-service.log`
+- `C:\Users\<Username>\AppData\Local\Temp\mt-repair-service\mt-repair-service.log`
 
 - Debug log file: Located in the same parent directory as the main log file, named `mt-repair-service-debug.log`
 

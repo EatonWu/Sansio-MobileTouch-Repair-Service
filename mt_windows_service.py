@@ -5,6 +5,7 @@ from pathlib import Path
 import traceback
 import os.path
 from threading import Event
+import psutil
 
 import win11toast
 import time
@@ -413,6 +414,29 @@ def run_application():
             pass
 
 
+def kill_other_instances():
+    """Kill other running instances of this application (except current process)."""
+    current_pid = os.getpid()
+    current_exe = None
+    try:
+        current_exe = psutil.Process(current_pid).exe()
+    except Exception:
+        pass
+    for proc in psutil.process_iter(['pid', 'name', 'exe', 'cmdline']):
+        try:
+            if proc.pid == current_pid:
+                continue
+            # Check if process is the same script/exe
+            if current_exe and proc.exe() == current_exe:
+                proc.kill()
+            elif 'mt_windows_service.py' in (proc.cmdline() or []):
+                proc.kill()
+            elif 'mt_windows_service.exe' in (proc.info['name'] or ''):
+                logging.info("Found another instance of the service, killing it")
+                proc.kill()
+        except Exception:
+            continue
+
 
 def init():
     """Initialize the application"""
@@ -423,7 +447,7 @@ def init():
 
 
 def main():
-    """Main entry point for the application"""
+    kill_other_instances()
     init()
     run_application()
 

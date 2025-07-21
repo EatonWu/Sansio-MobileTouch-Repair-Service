@@ -687,9 +687,11 @@ def _with_archive_parse_real_logs(archive_name):
         # Verify that callbacks were triggered
         callback_triggered = False
         for trigger, count in triggered_callbacks.items():
-            if count > 0:
+            if count == 1:
                 callback_triggered = True
                 logger.info(f"Callback for {trigger.name} was triggered {count} times")
+            if count > 1:
+                assert False, f"Callback for {trigger.name} was triggered {count} times, expected only once"
 
         assert callback_triggered, f"No callbacks were triggered for archive {archive_name}. This might indicate that the real logs with trigger strings were not generated or detected."
         return True, triggered_callbacks
