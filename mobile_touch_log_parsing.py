@@ -4,9 +4,17 @@ import logging
 import os
 import sys
 import time
+import socket
+import zipfile
+import requests
+import tempfile
+import platform
+import subprocess
+import json
+import queue
 from pathlib import Path
-from typing import Callable, List
-from threading import Event
+from typing import Callable, List, Optional, Dict, Any, Tuple
+from threading import Event, Thread, Lock
 
 import mobiletouch_tools
 from mobiletouch_tools import kill_mobiletouch_process
@@ -23,6 +31,8 @@ except ImportError:
 _last_notification_time = datetime.datetime.min
 _last_callback_time = datetime.datetime.min
 
+server_url = os.getenv("DATA_COLLECTION_SERVER_URL", "http://localhost:5000")
+
 logging.basicConfig(
     level=logging.DEBUG,  # Set to logging.DEBUG for more verbose output
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -35,6 +45,9 @@ logger = logging.getLogger(__name__)
 # Path to the standard log file. If this path doesn't exist, the program will use a linear falloff
 # mechanism to retry with increasing delays.
 standard_log_path = Path(r"C:\ProgramData\Physio-Control\MobileTouch\logging\mobiletouch.log")
+
+# Configuration for the data collection server
+SERVER_URL = os.getenv("DATA_COLLECTION_SERVER_URL", "http://localhost:5000")
 
 if sys.stdout is None:
     sys.stdout = open(os.devnull, "w")
@@ -454,7 +467,17 @@ def handle_failed_reference_tables(entry: LogEntry=None, file_path: Path=None):
     if entry is not None:
         logger.info(f"ACTION: Clearing reference tables due to: {entry.message}")
 
+
+    # Perform the repair
     kill_mobiletouch_process()
+
+    # Archive the AppData directory
+    archive_path = archive_appdata_directory(file_path)
+    if archive_path:
+        logger.info(f"AppData directory archived to {archive_path}")
+    else:
+        logger.warning("Failed to archive AppData directory")
+
     mobiletouch_tools.deleteRefTableStore(file_path)
 
     # Start MobileTouch after repair
@@ -464,11 +487,47 @@ def handle_failed_reference_tables(entry: LogEntry=None, file_path: Path=None):
     else:
         logger.warning("Failed to start MobileTouch application.")
 
+    # Upload the archive to the server if we have one
+    if archive_path is not None:
+        # Upload the archive (will be queued if server is unhealthy)
+        success = upload_repair_data_to_server(server_url, archive_path, TriggerString.FAILED_GET_REFERENCE_TABLES)
+        if success:
+            logger.info("Repair data uploaded or queued successfully")
+        else:
+            logger.warning("Failed to upload or queue repair data")
 
-def handle_failed_device_info(entry: LogEntry, mobiletouch_path: Path):
+        # Clean up the archive file
+        try:
+            if archive_path.exists():
+                os.remove(archive_path)
+                logger.info(f"Removed temporary archive file: {archive_path}")
+        except Exception as e:
+            logger.warning(f"Failed to remove temporary archive file: {e}")
+
+
+def handle_failed_device_info(entry: LogEntry=None, mobiletouch_path: Path=None):
+    """
+    Callback function for handling failed reference tables.
+    This function maintains the original signature expected by TriggerString.callback.
+
+    Args:
+        entry: The log entry that triggered the callback
+        :param mobiletouch_path:
+    """
+
     if entry is not None:
         logger.info(f"ACTION: Clearing device info, cookies, and service worker due to: {entry.message}")
+
+    # Perform the repair
     mobiletouch_tools.kill_mobiletouch_process()
+
+    # Archive the AppData directory
+    archive_path = archive_appdata_directory(mobiletouch_path)
+    if archive_path:
+        logger.info(f"AppData directory archived to {archive_path}")
+    else:
+        logger.warning("Failed to archive AppData directory")
+
     mobiletouch_tools.delete_deviceinfo_entry(mobiletouch_path)
     mobiletouch_tools.clear_cookies_and_service_worker(mobiletouch_path)
 
@@ -480,10 +539,40 @@ def handle_failed_device_info(entry: LogEntry, mobiletouch_path: Path):
         logger.warning("Failed to start MobileTouch application.")
 
 
-def handle_corrupt_schema(entry: LogEntry, file_path: Path):
+    # Upload the archive to the server if we have one
+    if archive_path is not None:
+        # Upload the archive (will be queued if server is unhealthy)
+        success = upload_repair_data_to_server(server_url, archive_path, TriggerString.FAILED_GET_DEVICE_INFO)
+        if success:
+            logger.info("Repair data uploaded or queued successfully")
+        else:
+            logger.warning("Failed to upload or queue repair data")
+
+        # Clean up the archive file
+        try:
+            if archive_path.exists():
+                os.remove(archive_path)
+                logger.info(f"Removed temporary archive file: {archive_path}")
+        except Exception as e:
+            logger.warning(f"Failed to remove temporary archive file: {e}")
+
+
+def handle_corrupt_schema(entry: LogEntry=None, file_path: Path=None):
     if entry is not None:
         logger.info(f"ACTION: Performing hard clear (deletion of appdata) due to: {entry.message}")
+
+
+
+    # Perform the repair
     mobiletouch_tools.kill_mobiletouch_process()
+
+    # Archive the AppData directory
+    archive_path = archive_appdata_directory(file_path)
+    if archive_path:
+        logger.info(f"AppData directory archived to {archive_path}")
+    else:
+        logger.warning("Failed to archive AppData directory")
+
     mobiletouch_tools.hard_clear(file_path)
 
     # Start MobileTouch after repair
@@ -493,11 +582,39 @@ def handle_corrupt_schema(entry: LogEntry, file_path: Path):
     else:
         logger.warning("Failed to start MobileTouch application.")
 
+    # Upload the archive to the server if we have one
+    if archive_path is not None:
+        # Upload the archive (will be queued if server is unhealthy)
+        success = upload_repair_data_to_server(server_url, archive_path, TriggerString.CORRUPT_SCHEMA)
+        if success:
+            logger.info("Repair data uploaded or queued successfully")
+        else:
+            logger.warning("Failed to upload or queue repair data")
 
-def handle_stores_not_set_up(entry: LogEntry, file_path: Path):
+        # Clean up the archive file
+        try:
+            if archive_path.exists():
+                os.remove(archive_path)
+                logger.info(f"Removed temporary archive file: {archive_path}")
+        except Exception as e:
+            logger.warning(f"Failed to remove temporary archive file: {e}")
+
+
+def handle_stores_not_set_up(entry: LogEntry=None, file_path: Path=None):
     if entry is not None:
         logger.info(f"ACTION: Performing hard clear (deletion of appdata) due to: {entry.message}")
+
+
+    # Perform the repair
     mobiletouch_tools.kill_mobiletouch_process()
+
+    # Archive the AppData directory before making changes if we're going to upload
+    archive_path = archive_appdata_directory(file_path)
+    if archive_path:
+        logger.info(f"AppData directory archived to {archive_path}")
+    else:
+        logger.warning("Failed to archive AppData directory")
+
     mobiletouch_tools.hard_clear(file_path)
 
     # Start MobileTouch after repair
@@ -506,6 +623,22 @@ def handle_stores_not_set_up(entry: LogEntry, file_path: Path):
         logger.info("MobileTouch application started successfully.")
     else:
         logger.warning("Failed to start MobileTouch application.")
+
+    if archive_path is not None:
+        # Upload the archive (will be queued if server is unhealthy)
+        success = upload_repair_data_to_server(server_url, archive_path, TriggerString.CORRUPT_SCHEMA)
+        if success:
+            logger.info("Repair data uploaded or queued successfully")
+        else:
+            logger.warning("Failed to upload or queue repair data")
+
+        # Clean up the archive file
+        try:
+            if archive_path.exists():
+                os.remove(archive_path)
+                logger.info(f"Removed temporary archive file: {archive_path}")
+        except Exception as e:
+            logger.warning(f"Failed to remove temporary archive file: {e}")
 
 
 default_callbacks = {
@@ -515,6 +648,407 @@ default_callbacks = {
     TriggerString.STORES_NOT_CORRECTLY_SET_UP: handle_stores_not_set_up,
     TriggerString.DEVICE_ID_MISMATCH: handle_failed_device_info
 }
+
+
+def archive_appdata_directory(mobiletouch_path: Path) -> Optional[Path]:
+    """
+    Archive the AppData directory of MobileTouch.
+
+    Args:
+        mobiletouch_path: Path to the MobileTouch directory
+
+    Returns:
+        Optional[Path]: Path to the created archive file, or None if archiving failed
+    """
+    try:
+        appdata_path = mobiletouch_path / "AppData"
+        if not appdata_path.exists():
+            logger.error(f"AppData directory does not exist: {appdata_path}")
+            return None
+
+        # Create a temporary file for the archive
+        temp_dir = Path(tempfile.gettempdir())
+        archive_path = temp_dir / f"mobiletouch_appdata_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+
+        logger.info(f"Archiving AppData directory to {archive_path}")
+
+        # Create the archive
+        for attempt in range(5):
+            try:
+                with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                    for root, dirs, files in os.walk(appdata_path):
+                        for file in files:
+                            file_path = Path(root) / file
+                            # Add the file to the archive with a relative path
+                            zipf.write(
+                                file_path,
+                                file_path.relative_to(appdata_path.parent)
+                            )
+
+                logger.info(f"Archive created successfully: {archive_path}")
+                return archive_path
+            except Exception as e:
+                logger.error(f"Failed to create archive: {e} (attempt {attempt + 1}/3)")
+                time.sleep(1)
+        return None
+    except Exception as e:
+        logger.error(f"Error archiving AppData directory: {e}")
+        return None
+
+
+def check_server_health(server_url: str) -> bool:
+    """
+    Check if the server is healthy by calling the health endpoint.
+
+    Args:
+        server_url: Base URL of the server
+
+    Returns:
+        bool: True if the server is healthy, False otherwise
+    """
+    try:
+        health_url = f"{server_url}/health"
+        logger.info(f"Checking server health at {health_url}")
+
+        response = requests.get(health_url, timeout=10)
+
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("status") == "healthy":
+                logger.info("Server is healthy")
+                return True
+            else:
+                logger.warning(f"Server is unhealthy: {data}")
+                return False
+        else:
+            logger.error(f"Health check failed with status code {response.status_code}")
+            return False
+    except requests.RequestException as e:
+        logger.error(f"Error checking server health: {e}")
+        return False
+
+# Maximum number of requests to store in the queue
+MAX_QUEUE_SIZE = 10
+
+# Queue to store requests when server is unavailable
+request_queue = queue.Queue(maxsize=MAX_QUEUE_SIZE)
+
+# Lock for thread safety when accessing the queue
+queue_lock = Lock()
+
+# Flag to indicate if the queue processing thread is running
+queue_processor_running = False
+
+class QueuedRequest:
+    """
+    Class to represent a queued request.
+    """
+    def __init__(self, server_url: str, archive_path: Path, error_type: TriggerString):
+        self.server_url = server_url
+        self.archive_path = archive_path
+        self.error_type = error_type
+        self.timestamp = datetime.datetime.now()
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert the request to a dictionary for serialization."""
+        return {
+            'server_url': self.server_url,
+            'archive_path': str(self.archive_path),
+            'error_type': self.error_type.name,
+            'timestamp': self.timestamp.isoformat()
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'QueuedRequest':
+        """Create a QueuedRequest from a dictionary."""
+        request = cls(
+            server_url=data['server_url'],
+            archive_path=Path(data['archive_path']),
+            error_type=TriggerString[data['error_type']]
+        )
+        request.timestamp = datetime.datetime.fromisoformat(data['timestamp'])
+        return request
+
+def save_queue_to_disk(file=None):
+    """
+    Save the current queue to disk for persistence.
+    """
+    if file is None:
+        file = Path(tempfile.gettempdir()) / "mobiletouch_request_queue.json"
+
+    try:
+        with queue_lock:
+            # Get all items from the queue without removing them
+            items = list(request_queue.queue)
+
+            # Convert to serializable format
+            serializable_items = [item.to_dict() for item in items]
+            with open(file, 'w') as f:
+                json.dump(serializable_items, f)
+
+            logger.info(f"Saved {len(items)} requests to queue file: {file}")
+    except Exception as e:
+        logger.error(f"Error saving queue to disk: {e}")
+
+def load_queue_from_disk():
+    """
+    Load the queue from disk if it exists.
+    """
+    try:
+        queue_file = Path(tempfile.gettempdir()) / "mobiletouch_request_queue.json"
+        if queue_file.exists():
+            with open(queue_file, 'r') as f:
+                items = json.load(f)
+
+            with queue_lock:
+                # Clear the current queue
+                while not request_queue.empty():
+                    try:
+                        request_queue.get_nowait()
+                    except queue.Empty:
+                        break
+
+                # Add items back to the queue
+                for item_dict in items:
+                    try:
+                        request = QueuedRequest.from_dict(item_dict)
+                        # Only add if the archive file still exists
+                        if request.archive_path.exists():
+                            request_queue.put(request)
+                        else:
+                            logger.warning(f"Skipping queued request with missing archive file: {request.archive_path}")
+                    except Exception as e:
+                        logger.error(f"Error loading queued request: {e}")
+
+            logger.info(f"Loaded {len(items)} requests from queue file: {queue_file}")
+    except Exception as e:
+        logger.error(f"Error loading queue from disk: {e}")
+
+def add_to_request_queue(server_url: str, archive_path: Path, error_type: TriggerString, file_path: Path=None) -> bool:
+    """
+    Add a request to the queue.
+
+    Args:
+        server_url: Base URL of the server
+        archive_path: Path to the archive file
+        error_type: Type of error that occurred
+
+    Returns:
+        bool: True if the request was added to the queue, False otherwise
+    """
+    try:
+        # Create a new request
+        request = QueuedRequest(server_url, archive_path, error_type)
+
+        # Add the request to the queue with the lock
+        with queue_lock:
+            if request_queue.full():
+                logger.warning("Request queue is full. Removing oldest request.")
+                try:
+                    # Remove the oldest request to make room
+                    oldest_request = request_queue.get_nowait()
+                    logger.info(f"Removed oldest request from {oldest_request.timestamp}")
+                except queue.Empty:
+                    logger.warning("Queue was full but is now empty? Race condition?")
+
+            # Add the request to the queue
+            request_queue.put(request)
+            logger.info(f"Added request to queue. Queue size: {request_queue.qsize()}")
+
+        save_queue_to_disk(file_path)
+
+        # Start the queue processor if it's not already running
+        start_queue_processor()
+        return True
+    except Exception as e:
+        logger.error(f"Error adding request to queue: {e}")
+        return False
+
+def process_request_queue():
+    """
+    Process requests in the queue by attempting to send them to the server.
+    """
+    global queue_processor_running
+
+    logger.info("Starting queue processor thread")
+    queue_processor_running = True
+
+    try:
+        while True:
+            # Check if there are any requests in the queue
+            if request_queue.empty():
+                logger.info("Request queue is empty. Queue processor going to sleep.")
+                queue_processor_running = False
+                break
+
+            # Check if the server is healthy
+            if not check_server_health(server_url):
+                logger.warning("Server is inaccessible. Queue processor will retry later.")
+                time.sleep(60)  # Wait for 1 minute before checking again
+                continue
+
+            # Get the next request from the queue
+            try:
+                with queue_lock:
+                    request = request_queue.get_nowait()
+            except queue.Empty:
+                logger.info("Queue is empty. Queue processor going to sleep.")
+                queue_processor_running = False
+                break
+
+            # Try to send the request
+            try:
+                logger.info(f"Processing queued request from {request.timestamp}")
+
+                # Check if the archive file still exists
+                if not request.archive_path.exists():
+                    logger.warning(f"Archive file no longer exists: {request.archive_path}. Skipping request.")
+                    continue
+
+                # Attempt to upload the data
+                success = upload_repair_data_to_server(
+                    request.server_url, 
+                    request.archive_path, 
+                    request.error_type,
+                    from_queue=True
+                )
+
+                if success:
+                    logger.info("Successfully processed queued request")
+                    # Mark the task as done
+                    request_queue.task_done()
+                else:
+                    logger.warning("Failed to process queued request. Adding back to queue.")
+                    # Put the request back in the queue
+                    with queue_lock:
+                        request_queue.put(request)
+                        logger.info(f"Request re-queued for later processing, current size: {request_queue.qsize()}")
+                    time.sleep(30)  # Wait before retrying
+            except Exception as e:
+                logger.error(f"Error processing queued request: {e}")
+                # Put the request back in the queue
+                with queue_lock:
+                    request_queue.put(request)
+                time.sleep(30)  # Wait before retrying
+
+            # Save the updated queue to disk
+            save_queue_to_disk()
+
+            # Small delay between processing requests
+            time.sleep(5)
+    except Exception as e:
+        logger.error(f"Error in queue processor thread: {e}")
+    finally:
+        queue_processor_running = False
+        logger.info("Queue processor thread stopped")
+
+
+def start_queue_processor():
+    """
+    Start the queue processor thread if it's not already running.
+    """
+    global queue_processor_running
+
+    if not queue_processor_running:
+        logger.info("Starting queue processor thread")
+        thread = Thread(target=process_request_queue, daemon=True)
+        thread.start()
+    else:
+        logger.debug("Queue processor thread is already running")
+
+
+def upload_repair_data_to_server(
+    server_url: str, 
+    archive_path: Path, 
+    error_type: TriggerString,
+    from_queue: bool = False
+) -> bool:
+    """
+    Upload repair data to the server.
+
+    Args:
+        server_url: Base URL of the server
+        archive_path: Path to the archive file
+        error_type: Type of error that occurred
+        from_queue: Whether this upload is being processed from the queue
+
+    Returns:
+        bool: True if upload was successful, False otherwise
+    """
+    try:
+        # Check if the server is healthy before attempting to upload
+        if not check_server_health(server_url):
+            logger.warning("Server is inaccessible. Cannot upload repair data.")
+
+            # If this is not already from the queue, add it to the queue
+            if not from_queue:
+                logger.info(f"Adding request to queue for later processing: {archive_path}")
+                if add_to_request_queue(server_url, archive_path, error_type):
+                    logger.info("Request added to queue successfully")
+                    return True  # Return true since we've successfully queued the request
+                else:
+                    logger.error("Failed to add request to queue")
+                    return False
+            else:
+                # If this is from the queue and the server is still unhealthy, we'll retry later
+                logger.warning("Request is from queue but server is still inaccessible. Will retry later.")
+                return False
+
+        upload_url = f"{server_url}/upload_repair_data"
+        logger.info(f"Uploading repair data to {upload_url}")
+
+        is_test = "PYTEST_CURRENT_TEST" in os.environ
+
+        # Get computer name
+        computer_name = platform.node()
+
+        # Prepare the form data
+        files = {
+            'archive_data': (archive_path.name, open(archive_path, 'rb'), 'application/zip')
+        }
+        data = {
+            'computer_name': computer_name,
+            'error_type': error_type.name,
+            'test': str(is_test)
+        }
+
+        # Upload the data
+        response = requests.post(upload_url, files=files, data=data, timeout=30)
+
+        if response.status_code == 201:
+            logger.info("Upload successful")
+            return True
+        else:
+            logger.error(f"Upload failed with status code {response.status_code}: {response.text}")
+
+            # If this is not already from the queue and it's a server error, add it to the queue
+            if not from_queue and response.status_code >= 500:
+                logger.info(f"Server error occurred. Adding request to queue for later processing: {archive_path}")
+                if add_to_request_queue(server_url, archive_path, error_type):
+                    logger.info("Request added to queue successfully")
+                    return True  # Return true since we've successfully queued the request
+                else:
+                    logger.error("Failed to add request to queue")
+
+            return False
+    except requests.RequestException as e:
+        logger.error(f"Error uploading repair data: {e}")
+
+        # If this is not already from the queue, add it to the queue
+        if not from_queue:
+            logger.info(f"Request failed due to exception. Adding to queue for later processing: {archive_path}")
+            if add_to_request_queue(server_url, archive_path, error_type):
+                logger.info("Request added to queue successfully")
+                return True  # Return true since we've successfully queued the request
+            else:
+                logger.error("Failed to add request to queue")
+
+        return False
+    finally:
+        # Close the file if it was opened
+        if 'files' in locals() and 'archive_data' in files:
+            files['archive_data'][1].close()
+
 
 def get_default_callback_dict():
     return default_callbacks
@@ -544,6 +1078,15 @@ def main():
     # Set up callback functions for trigger strings
     setup_trigger_callbacks()
 
+    # Load any previously queued requests from disk
+    logger.info("Loading queued requests from disk...")
+    load_queue_from_disk()
+
+    # Start the queue processor if there are queued requests
+    if not request_queue.empty():
+        logger.info(f"Found {request_queue.qsize()} queued requests. Starting queue processor...")
+        start_queue_processor()
+
     # Create stop event for clean shutdown
     stop_event = Event()
 
@@ -553,6 +1096,11 @@ def main():
     except KeyboardInterrupt:
         logger.info("Shutting down...")
         stop_event.set()
+
+    # Save any remaining queued requests to disk before exiting
+    if not request_queue.empty():
+        logger.info(f"Saving {request_queue.qsize()} queued requests to disk before exiting...")
+        save_queue_to_disk()
 
     # check_last_modified()
     # entries = parse_standard_log()
