@@ -4,12 +4,10 @@ import logging
 import os
 import sys
 import time
-import socket
 import zipfile
 import requests
 import tempfile
 import platform
-import subprocess
 import json
 import queue
 from pathlib import Path
@@ -18,8 +16,9 @@ from threading import Event, Thread, Lock
 
 import mobiletouch_tools
 from mobiletouch_tools import kill_mobiletouch_process
+from TriggerString import TriggerString
+from dotenv import load_dotenv
 
-# Import win11toast for notifications
 try:
     from win11toast import notify
     NOTIFICATIONS_AVAILABLE = True
@@ -27,11 +26,11 @@ except ImportError:
     NOTIFICATIONS_AVAILABLE = False
     logging.warning("win11toast not available. Notifications will be disabled.")
 
+env_file_path = os.path.join(os.path.dirname(__file__), '.env')
+
 # Global variable to track the last notification time
 _last_notification_time = datetime.datetime.min
 _last_callback_time = datetime.datetime.min
-
-server_url = os.getenv("DATA_COLLECTION_SERVER_URL", "http://localhost:5000")
 
 logging.basicConfig(
     level=logging.DEBUG,  # Set to logging.DEBUG for more verbose output
@@ -42,76 +41,41 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+
 # Path to the standard log file. If this path doesn't exist, the program will use a linear falloff
 # mechanism to retry with increasing delays.
 standard_log_path = Path(r"C:\ProgramData\Physio-Control\MobileTouch\logging\mobiletouch.log")
 
-# Configuration for the data collection server
-SERVER_URL = os.getenv("DATA_COLLECTION_SERVER_URL", "http://localhost:5000")
+# Check if .env file exists
+if not os.path.exists(env_file_path):
+    logger.info(".env file not found. Creating with default values or from environment variables.")
+
+    # Define default values and check if they're overridden in the environment
+    env_vars = {
+        'DATA_COLLECTION_SERVER_URL' : "http://localhost",
+        'DATA_COLLECTION_SERVER_PORT': "5000",
+    }
+
+    # Create .env file with the values
+    with open(env_file_path, 'w') as env_file:
+        for key, value in env_vars.items():
+            env_file.write(f"{key}={value}\n")
+
+    logger.info(f".env file created at {env_file_path}")
+else:
+    logger.info(f".env file found at {env_file_path}. Loading environment variables.")
+
+# Load environment variables from .env file
+load_dotenv(env_file_path)
+server_url = os.getenv('DATA_COLLECTION_SERVER_URL', 'http://localhost')
+server_port = os.getenv('DATA_COLLECTION_SERVER_PORT', '5000')
 
 if sys.stdout is None:
     sys.stdout = open(os.devnull, "w")
 if sys.stderr is None:
     sys.stderr = open(os.devnull, "w")
 
-class TriggerString(enum.Enum):
-    """
-    Enumeration of trigger strings used in the MobileTouch log file.
-    These strings are used to identify specific events or actions in the log.
-    """
-
-    # response should be to clear reference tables
-    # this usually points to a corrupt reference table
-    FAILED_GET_REFERENCE_TABLES = "storeAction() fail: LoadAll:getAllReferenceTables"
-
-    # response should be to clear device info, cookies, and service worker
-    # this usually points a missing device info or a corrupt object store
-    FAILED_GET_DEVICE_INFO = "storeAction() fail: LoadByKey:getDeviceInfo"
-
-    # The ones below require a hard reset, which is fine since the chart/app data is likely lost anyway
-    # response should be to do a hard clear (deletion of appdata)
-    # this usually points to database corruption
-    CORRUPT_SCHEMA = "init schema: error: Internal error"
-
-    # response should be to do a hard clear (deletion of appdata)
-    # this usually points to database corruption
-    STORES_NOT_CORRECTLY_SET_UP = "Stores not correctly set up, db"
-
-    DEVICE_ID_MISMATCH = "Error: Device configuration corrupt - device ID mismatch (3)"
-
-    UNKNOWN = "UNKNOWN"
-
-
-    def __init__(self, value):
-        self._value_ = value
-        self._callback = None
-
-    @property
-    def callback(self):
-        """Get the callback function for this trigger string."""
-        return self._callback
-
-    @callback.setter
-    def callback(self, func: Callable[['LogEntry', Path], None]):
-        """
-        Set a callback function to be called when this trigger string is detected.
-
-        Args:
-            func: A function that takes a LogEntry and Path as arguments and returns None.
-        """
-        self._callback = func
-
-    @staticmethod
-    def from_message(message: str):
-        """
-        Returns the TriggerString that matches the given message.
-        :return: TriggerString if found, otherwise UNKNOWN.
-        """
-        for trigger in TriggerString:
-            if trigger.name in message:
-                return trigger
-        logger.debug(f"No matching trigger string found for message: {message}")
-        return TriggerString.UNKNOWN
 
 class LogLevel(enum.Enum):
     """
@@ -335,10 +299,9 @@ def check_trigger_strings(entry: LogEntry, mobiletouch_path: Path = standard_log
             logger.info(f"Detected trigger string {trigger.name}: {entry}")
 
             if trigger.callback:
-
                 # Check if enough time has passed since the last callback
-                if (datetime.datetime.now() - _last_callback_time).total_seconds() < 15:
-                    logger.info(f"Skipping callback for {trigger.name}: last callback was less than 15 seconds ago.")
+                if (datetime.datetime.now() - _last_callback_time).total_seconds() < 30:
+                    logger.info(f"Skipping callback for {trigger.name}: last callback was less than 30 seconds ago.")
                     break
 
                 # Send notification about the detected error
@@ -490,19 +453,13 @@ def handle_failed_reference_tables(entry: LogEntry=None, file_path: Path=None):
     # Upload the archive to the server if we have one
     if archive_path is not None:
         # Upload the archive (will be queued if server is unhealthy)
-        success = upload_repair_data_to_server(server_url, archive_path, TriggerString.FAILED_GET_REFERENCE_TABLES)
+        success = upload_repair_data_to_server(archive_path, TriggerString.FAILED_GET_REFERENCE_TABLES)
         if success:
             logger.info("Repair data uploaded or queued successfully")
         else:
             logger.warning("Failed to upload or queue repair data")
 
-        # Clean up the archive file
-        try:
-            if archive_path.exists():
-                os.remove(archive_path)
-                logger.info(f"Removed temporary archive file: {archive_path}")
-        except Exception as e:
-            logger.warning(f"Failed to remove temporary archive file: {e}")
+
 
 
 def handle_failed_device_info(entry: LogEntry=None, mobiletouch_path: Path=None):
@@ -542,7 +499,7 @@ def handle_failed_device_info(entry: LogEntry=None, mobiletouch_path: Path=None)
     # Upload the archive to the server if we have one
     if archive_path is not None:
         # Upload the archive (will be queued if server is unhealthy)
-        success = upload_repair_data_to_server(server_url, archive_path, TriggerString.FAILED_GET_DEVICE_INFO)
+        success = upload_repair_data_to_server(archive_path, TriggerString.FAILED_GET_DEVICE_INFO)
         if success:
             logger.info("Repair data uploaded or queued successfully")
         else:
@@ -585,7 +542,7 @@ def handle_corrupt_schema(entry: LogEntry=None, file_path: Path=None):
     # Upload the archive to the server if we have one
     if archive_path is not None:
         # Upload the archive (will be queued if server is unhealthy)
-        success = upload_repair_data_to_server(server_url, archive_path, TriggerString.CORRUPT_SCHEMA)
+        success = upload_repair_data_to_server(archive_path, TriggerString.CORRUPT_SCHEMA)
         if success:
             logger.info("Repair data uploaded or queued successfully")
         else:
@@ -626,7 +583,7 @@ def handle_stores_not_set_up(entry: LogEntry=None, file_path: Path=None):
 
     if archive_path is not None:
         # Upload the archive (will be queued if server is unhealthy)
-        success = upload_repair_data_to_server(server_url, archive_path, TriggerString.CORRUPT_SCHEMA)
+        success = upload_repair_data_to_server(archive_path, TriggerString.CORRUPT_SCHEMA)
         if success:
             logger.info("Repair data uploaded or queued successfully")
         else:
@@ -646,7 +603,8 @@ default_callbacks = {
     TriggerString.FAILED_GET_DEVICE_INFO: handle_failed_device_info,
     TriggerString.CORRUPT_SCHEMA: handle_corrupt_schema,
     TriggerString.STORES_NOT_CORRECTLY_SET_UP: handle_stores_not_set_up,
-    TriggerString.DEVICE_ID_MISMATCH: handle_failed_device_info
+    TriggerString.DEVICE_ID_MISMATCH: handle_failed_device_info,
+    TriggerString.MISSING_DEVICE_ID: handle_failed_device_info
 }
 
 
@@ -696,18 +654,14 @@ def archive_appdata_directory(mobiletouch_path: Path) -> Optional[Path]:
         return None
 
 
-def check_server_health(server_url: str) -> bool:
+def check_server_health() -> bool:
     """
     Check if the server is healthy by calling the health endpoint.
-
-    Args:
-        server_url: Base URL of the server
-
     Returns:
         bool: True if the server is healthy, False otherwise
     """
     try:
-        health_url = f"{server_url}/health"
+        health_url = f"{server_url}:{server_port}/health"
         logger.info(f"Checking server health at {health_url}")
 
         response = requests.get(health_url, timeout=10)
@@ -882,7 +836,7 @@ def process_request_queue():
                 break
 
             # Check if the server is healthy
-            if not check_server_health(server_url):
+            if not check_server_health():
                 logger.warning("Server is inaccessible. Queue processor will retry later.")
                 time.sleep(60)  # Wait for 1 minute before checking again
                 continue
@@ -907,8 +861,7 @@ def process_request_queue():
 
                 # Attempt to upload the data
                 success = upload_repair_data_to_server(
-                    request.server_url, 
-                    request.archive_path, 
+                    request.archive_path,
                     request.error_type,
                     from_queue=True
                 )
@@ -958,8 +911,7 @@ def start_queue_processor():
 
 
 def upload_repair_data_to_server(
-    server_url: str, 
-    archive_path: Path, 
+    archive_path: Path,
     error_type: TriggerString,
     from_queue: bool = False
 ) -> bool:
@@ -967,7 +919,6 @@ def upload_repair_data_to_server(
     Upload repair data to the server.
 
     Args:
-        server_url: Base URL of the server
         archive_path: Path to the archive file
         error_type: Type of error that occurred
         from_queue: Whether this upload is being processed from the queue
@@ -977,7 +928,7 @@ def upload_repair_data_to_server(
     """
     try:
         # Check if the server is healthy before attempting to upload
-        if not check_server_health(server_url):
+        if not check_server_health():
             logger.warning("Server is inaccessible. Cannot upload repair data.")
 
             # If this is not already from the queue, add it to the queue
@@ -994,7 +945,7 @@ def upload_repair_data_to_server(
                 logger.warning("Request is from queue but server is still inaccessible. Will retry later.")
                 return False
 
-        upload_url = f"{server_url}/upload_repair_data"
+        upload_url = f"{server_url}:{server_port}/upload_repair_data"
         logger.info(f"Uploading repair data to {upload_url}")
 
         is_test = "PYTEST_CURRENT_TEST" in os.environ
@@ -1017,6 +968,14 @@ def upload_repair_data_to_server(
 
         if response.status_code == 201:
             logger.info("Upload successful")
+            # Clean up the archive file
+            try:
+                if archive_path.exists():
+                    os.remove(archive_path)
+                    logger.info(f"Removed temporary archive file: {archive_path}")
+            except Exception as e:
+                logger.warning(f"Failed to remove temporary archive file: {e}")
+
             return True
         else:
             logger.error(f"Upload failed with status code {response.status_code}: {response.text}")
@@ -1107,6 +1066,7 @@ def main():
     #
     # for entry in entries:
     #     print(entry)
+
 
 if __name__ == "__main__":
     try:
