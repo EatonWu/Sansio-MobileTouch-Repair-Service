@@ -1,9 +1,6 @@
 import os
 import logging
-import json
 from flask import Flask, request, jsonify, redirect
-import secrets
-import base64
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
@@ -12,7 +9,7 @@ import sys
 
 # Add the parent directory to the path so we can import mobile_touch_log_parsing
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from mobile_touch_log_parsing import TriggerString
+from TriggerString import TriggerString
 
 # Configure logging
 logging.basicConfig(
@@ -244,7 +241,10 @@ def health_check():
 @swag_from({
     'tags': ['Data Collection'],
     'summary': 'Upload repair archive data',
-    'description': 'Endpoint to upload archived AppData folder from a bad MobileTouch instance',
+    'description': """Endpoint to upload repair archive data.
+Expects multipart/form-data with computer_name, error_type, and archive_data.
+Saves the data to the database unless test=true is specified.
+    """,
     'consumes': ['multipart/form-data'],
     'produces': ['application/json'],
     'parameters': [

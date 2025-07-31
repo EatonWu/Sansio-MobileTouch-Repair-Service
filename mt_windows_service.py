@@ -13,6 +13,7 @@ import logging.handlers
 import sys
 import os
 import mobile_touch_log_parsing
+from dotenv import load_dotenv
 
 if sys.stdout is None:
     sys.stdout = open(os.devnull, "w")
