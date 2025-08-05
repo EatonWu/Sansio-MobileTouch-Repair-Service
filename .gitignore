@@ -1,2 +1,4 @@
 /test_archives/*
 !INTENTIONALLY_EMPTY
+.env
+server/.env

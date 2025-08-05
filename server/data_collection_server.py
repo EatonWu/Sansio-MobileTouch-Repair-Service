@@ -1,11 +1,16 @@
+import io
 import os
 import logging
+import tempfile
+from datetime import datetime
+
 from flask import Flask, request, jsonify, redirect
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 from flasgger import Swagger, swag_from
 import sys
+import pyzipper
 
 # Add the parent directory to the path so we can import mobile_touch_log_parsing
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -65,7 +70,8 @@ if not os.path.exists(env_file_path):
         'DB_PASSWORD': os.environ.get('DB_PASSWORD', 'postgres'),
         'DATABASE_HOST': os.environ.get('DATABASE_HOST', 'localhost'),
         'DATABASE_PORT': os.environ.get('DATABASE_PORT', '5432'),
-        'DATABASE_NAME': os.environ.get('DATABASE_NAME', 'postgres')
+        'DATABASE_NAME': os.environ.get('DATABASE_NAME', 'postgres'),
+        'ARCHIVE_ENCRYPTION_KEY': os.environ.get('ARCHIVE_ENCRYPTION_KEY', 'password')
     }
 
     # Create .env file with the values
@@ -85,6 +91,7 @@ try:
     host = os.getenv('DATABASE_HOST', 'localhost')
     port = int(os.getenv('DATABASE_PORT', 5432))
     dbname = os.getenv('DATABASE_NAME', 'postgres')
+    archive_encryption_key = os.getenv('ARCHIVE_ENCRYPTION_KEY')
 
     # Create PostgreSQL connection
     conn = psycopg2.connect(
@@ -383,6 +390,7 @@ def upload_repair_data():
             return jsonify({"error": f"Invalid error_type. Must be one of: {[trigger.name for trigger in TriggerString]}"}), 400
 
         # Read the archive file
+        logger.info(f"Reading archive file for computer: {computer_name}, error_type: {error_type}")
         archive_data = archive_file.read()
         if not archive_data:
             logger.error("Archive data is empty")
@@ -399,16 +407,64 @@ def upload_repair_data():
                     "test": True
                 }), 201
 
-            # Insert data into the repair_archive_data table
-            cursor.execute(
-                "INSERT INTO repair_archive_data (computer_name, error_type, archive_data) VALUES (%s, %s, %s) RETURNING id",
-                (computer_name, error_type, psycopg2.Binary(archive_data))
-            )
-            result = cursor.fetchone()
-            conn.commit()
+            # encrypt with pyzipper
+            if archive_encryption_key:
+                #         with pyzipper.AESZipFile('encrypted.zip', 'w', compression=pyzipper.ZIP_DEFLATED, encryption=pyzipper.WZ_AES) as zf:
+                #             zf.setpassword(b'password123')
+                #             zf.writestr('icon.png', data)
+
+                # computer_name = result['computer_name']
+                #         error_type = result['error_type']
+                #         archive_data = result['archive_data']
+                #         created_at = result['created_at']
+                #
+                #         # Create a filename for the download
+                logger.info(f"Encrypting archive data for computer: {computer_name}, error_type: {error_type}")
+                filename = f"mobiletouch_appdata_{computer_name}_{error_type}_{datetime.now()}.zip".replace(" ", "_").replace(":", "-")
+                temp_dir = tempfile.gettempdir()
+                filename = os.path.join(temp_dir, filename)
+
+                with pyzipper.AESZipFile(
+                        filename,
+                        'w',
+                        compression=pyzipper.ZIP_DEFLATED,
+                        encryption=pyzipper.WZ_AES
+                ) as zf:
+                    zf.setpassword(archive_encryption_key.encode('utf-8'))
+                    zf.writestr('AppData', archive_data)
+
+                # read file as bytes
+                with open(filename, 'rb') as f:
+                    archive_data = f.read()
+                    logger.info("archive data bytes: %s", archive_data[:100])  # Log first 100 bytes for debugging
+
+                    # Insert data into the repair_archive_data table
+                    cursor.execute(
+                        "INSERT INTO repair_archive_data (computer_name, error_type, archive_data) VALUES (%s, %s, %s) RETURNING id",
+                        (computer_name, error_type, psycopg2.Binary(archive_data))
+                    )
+                result = cursor.fetchone()
+                conn.commit()
+
+                # delete the file
+                if os.path.exists(filename):
+                    os.remove(filename)
+                    logger.info(f"Temporary file {filename} deleted")
+            else:
+                # Insert data into the repair_archive_data table
+                cursor.execute(
+                    "INSERT INTO repair_archive_data (computer_name, error_type, archive_data) VALUES (%s, %s, %s) RETURNING id",
+                    (computer_name, error_type, psycopg2.Binary(archive_data))
+                )
+                result = cursor.fetchone()
+                conn.commit()
+
+            logger.info(f"Archive data saved to database with ID: {result['id']} for computer: {computer_name}, error_type: {error_type}")
+
+
 
             return jsonify({
-                "status": "success", 
+                "status": "success",
                 "message": "Archive data received and saved to database",
                 "id": result['id'],
                 "test": False
