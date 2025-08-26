@@ -20,7 +20,7 @@ try {
     & .\.venv\Scripts\Activate.ps1
 
     pyinstaller --runtime-tmpdir=. .\mt_windows_service.py --noconfirm --add-data="./chrome-win32/*;./chrome-win32" `
-        --add-binary="./chromedriver.exe:." -w
+        --add-binary="./chromedriver.exe:." --add-data="./.env:." -w
 
     if (-not $?) {
         throw "PyInstaller failed to build the executable."

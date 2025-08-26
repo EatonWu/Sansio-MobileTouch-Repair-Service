@@ -27,9 +27,11 @@ class TriggerString(enum.Enum):
     # this usually points to database corruption
     STORES_NOT_CORRECTLY_SET_UP = "Stores not correctly set up, db"
 
-    MISSING_DEVICE_ID = "Device configuration corrupt - missing device ID (2)"
+    MISSING_DEVICE_ID_2 = "Device configuration corrupt - missing device ID (2)"
 
     DEVICE_ID_MISMATCH = "Error: Device configuration corrupt - device ID mismatch (3)"
+
+    MISSING_DEVICE_ID_1 = "Corrupted configuration - missing device ID (1)"
 
     UNKNOWN = "UNKNOWN"
 

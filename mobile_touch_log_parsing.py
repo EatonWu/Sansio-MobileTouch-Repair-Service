@@ -495,23 +495,15 @@ def handle_failed_device_info(entry: LogEntry=None, mobiletouch_path: Path=None)
     else:
         logger.warning("Failed to start MobileTouch application.")
 
-
     # Upload the archive to the server if we have one
     if archive_path is not None:
         # Upload the archive (will be queued if server is unhealthy)
         success = upload_repair_data_to_server(archive_path, TriggerString.FAILED_GET_DEVICE_INFO)
         if success:
             logger.info("Repair data uploaded or queued successfully")
+            # Clean up the archive file
         else:
             logger.warning("Failed to upload or queue repair data")
-
-        # Clean up the archive file
-        try:
-            if archive_path.exists():
-                os.remove(archive_path)
-                logger.info(f"Removed temporary archive file: {archive_path}")
-        except Exception as e:
-            logger.warning(f"Failed to remove temporary archive file: {e}")
 
 
 def handle_corrupt_schema(entry: LogEntry=None, file_path: Path=None):
@@ -548,13 +540,6 @@ def handle_corrupt_schema(entry: LogEntry=None, file_path: Path=None):
         else:
             logger.warning("Failed to upload or queue repair data")
 
-        # Clean up the archive file
-        try:
-            if archive_path.exists():
-                os.remove(archive_path)
-                logger.info(f"Removed temporary archive file: {archive_path}")
-        except Exception as e:
-            logger.warning(f"Failed to remove temporary archive file: {e}")
 
 
 def handle_stores_not_set_up(entry: LogEntry=None, file_path: Path=None):
@@ -589,22 +574,14 @@ def handle_stores_not_set_up(entry: LogEntry=None, file_path: Path=None):
         else:
             logger.warning("Failed to upload or queue repair data")
 
-        # Clean up the archive file
-        try:
-            if archive_path.exists():
-                os.remove(archive_path)
-                logger.info(f"Removed temporary archive file: {archive_path}")
-        except Exception as e:
-            logger.warning(f"Failed to remove temporary archive file: {e}")
-
-
 default_callbacks = {
     TriggerString.FAILED_GET_REFERENCE_TABLES: handle_failed_reference_tables,
     TriggerString.FAILED_GET_DEVICE_INFO: handle_failed_device_info,
     TriggerString.CORRUPT_SCHEMA: handle_corrupt_schema,
     TriggerString.STORES_NOT_CORRECTLY_SET_UP: handle_stores_not_set_up,
     TriggerString.DEVICE_ID_MISMATCH: handle_failed_device_info,
-    TriggerString.MISSING_DEVICE_ID: handle_failed_device_info
+    TriggerString.MISSING_DEVICE_ID_2: handle_failed_device_info,
+    TriggerString.MISSING_DEVICE_ID_1: handle_failed_device_info,
 }
 
 

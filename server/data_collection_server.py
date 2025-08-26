@@ -769,8 +769,6 @@ def list_incidents():
         return jsonify({"error": f"Failed to retrieve incidents: {str(e)}"}), 500
 
 
-
-
 @app.errorhandler(404)
 @swag_from({
     'tags': ['Error Handlers'],
